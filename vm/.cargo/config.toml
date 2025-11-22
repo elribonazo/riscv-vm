@@ -1,0 +1,8 @@
+[_unstable]
+unstable-options = true
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+    # Limit maximum linear memory to 1 GiB to support 512 MiB DRAM.
+    "-C", "link-arg=--max-memory=1073741824",
+]

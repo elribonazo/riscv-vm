@@ -1,0 +1,2690 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: kernel/**/*, vm/**/*, web/src/**/*
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+kernel/
+  .cargo/
+    config.toml
+  src/
+    allocator.rs
+    main.rs
+    uart.rs
+  build.rs
+  Cargo.toml
+  link.x
+  memory.x
+vm/
+  .cargo/
+    config.toml
+  src/
+    bus.rs
+    cpu.rs
+    dram.rs
+    lib.rs
+    loader.rs
+    main.rs
+    uart.rs
+  Cargo.toml
+web/
+  src/
+    app/
+      favicon.ico
+      globals.css
+      layout.tsx
+      page.tsx
+    hooks/
+      useVM.ts
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="kernel/.cargo/config.toml">
+[build]
+target = "riscv64imac-unknown-none-elf"
+
+[target.riscv64imac-unknown-none-elf]
+rustflags = [
+    "-C", "force-unwind-tables=no",
+    "-C", "code-model=medium",
+    "-C", "target-feature=-c",
+]
+</file>
+
+<file path="kernel/src/allocator.rs">
+use core::alloc::{GlobalAlloc, Layout};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+// MMIO address to report current heap usage in bytes
+const MMIO_MEM_USAGE: *mut u64 = 0x2000_0000 as *mut u64;
+
+unsafe extern "C" {
+    static mut _sheap: u8;
+    static mut _eheap: u8;
+}
+
+static HEAP_PTR: AtomicUsize = AtomicUsize::new(0);
+static HEAP_START: AtomicUsize = AtomicUsize::new(0);
+static HEAP_END: AtomicUsize = AtomicUsize::new(0);
+
+pub fn init() {
+    unsafe {
+        let start = _sheap as *const u8 as usize;
+        let end = _eheap as *const u8 as usize;
+        HEAP_START.store(start, Ordering::Relaxed);
+        HEAP_END.store(end, Ordering::Relaxed);
+        HEAP_PTR.store(start, Ordering::Relaxed);
+        // Report initial usage (0)
+        core::ptr::write_volatile(MMIO_MEM_USAGE, 0);
+    }
+}
+
+pub struct BumpAllocator;
+
+#[inline]
+fn align_up(addr: usize, align: usize) -> usize {
+    let mask = align - 1;
+    (addr + mask) & !mask
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let start = HEAP_START.load(Ordering::Relaxed);
+        let end = HEAP_END.load(Ordering::Relaxed);
+
+        loop {
+            let current = HEAP_PTR.load(Ordering::Relaxed);
+            let aligned = align_up(current, layout.align());
+            let next = match aligned.checked_add(layout.size()) {
+                Some(n) => n,
+                None => return core::ptr::null_mut(),
+            };
+            if next > end {
+                return core::ptr::null_mut();
+            }
+            if HEAP_PTR
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+            {
+                // Report new usage
+                let used = (next - start) as u64;
+                core::ptr::write_volatile(MMIO_MEM_USAGE, used);
+                return aligned as *mut u8;
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // No-op: simple bump allocator does not support free.
+        // Optionally, could report here as well, but we keep usage monotonic.
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator;
+</file>
+
+<file path="kernel/src/main.rs">
+#![no_std]
+#![no_main]
+
+mod uart;
+mod allocator;
+extern crate alloc;
+use alloc::vec::Vec;
+use panic_halt as _;
+use riscv_rt::entry;
+
+#[entry]
+fn main() -> ! {
+    uart::write_line("Booting RISC-V kernel CLI...");
+    uart::write_line("Type 'help' for a list of commands.");
+    // Initialize simple bump allocator
+    allocator::init();
+    print_prompt();
+
+    let console = uart::Console::new();
+    let mut buffer = [0u8; 128];
+    let mut len = 0usize;
+    let mut count: usize = 0;
+
+    loop {
+        let byte = console.read_byte();
+
+        // 0 means "no input" in our UART model
+        if byte == 0 {
+            continue;
+        }
+
+        match byte {
+            b'\r' | b'\n' => {
+                uart::write_line("");
+                handle_line(&buffer, len, &mut count);
+                print_prompt();
+                len = 0;
+            }
+            // Backspace / Delete
+            8 | 0x7f => {
+                if len > 0 {
+                    len -= 1;
+                    // Move cursor back, erase char, move back again.
+                    // (Simple TTY-style backspace handling.)
+                    uart::write_str("\u{8} \u{8}");
+                }
+            }
+            _ => {
+                if len < buffer.len() {
+                    buffer[len] = byte;
+                    len += 1;
+                    uart::Console::new().write_byte(byte);
+                }
+            }
+        }
+    }
+}
+
+fn print_prompt() {
+    uart::write_str("risk-v> ");
+}
+
+fn handle_line(buffer: &[u8], len: usize, count: &mut usize) {
+    // Trim leading/trailing whitespace (spaces and tabs only)
+    let mut start = 0;
+    let mut end = len;
+
+    while start < end && (buffer[start] == b' ' || buffer[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (buffer[end - 1] == b' ' || buffer[end - 1] == b'\t') {
+        end -= 1;
+    }
+
+    if start >= end {
+        // Empty line -> keep old behaviour: bump counter
+        uart::write_line("Available commands:");
+        uart::write_line("  help           - show this help");
+        uart::write_line("  hello          - increment and print the counter");
+        uart::write_line("  count          - show current counter value");
+        uart::write_line("  echo <text>    - print <text>");
+        uart::write_line("  clear          - print a few newlines");
+        uart::write_line("  alloc <bytes>  - allocate bytes (leaked) to test heap usage");
+        return;
+    }
+
+    let line = &buffer[start..end];
+
+    // Split into command and arguments (first whitespace)
+    let mut i = 0;
+    while i < line.len() && line[i] != b' ' && line[i] != b'\t' {
+        i += 1;
+    }
+    let cmd = &line[..i];
+
+    let mut arg_start = i;
+    while arg_start < line.len() && (line[arg_start] == b' ' || line[arg_start] == b'\t') {
+        arg_start += 1;
+    }
+    let args = &line[arg_start..];
+
+    if eq_cmd(cmd, b"help") {
+        uart::write_line("Available commands:");
+        uart::write_line("  help           - show this help");
+        uart::write_line("  hello          - increment and print the counter");
+        uart::write_line("  count          - show current counter value");
+        uart::write_line("  echo <text>    - print <text>");
+        uart::write_line("  clear          - print a few newlines");
+        uart::write_line("  alloc <bytes>  - allocate bytes (leaked) to test heap usage");
+    } else if eq_cmd(cmd, b"hello") {
+        *count += 400;
+        uart::write_str("Hello, count ");
+        uart::write_u64(*count as u64);
+        uart::write_line("");
+    } else if eq_cmd(cmd, b"count") {
+        uart::write_str("Current count: ");
+        uart::write_u64(*count as u64);
+        uart::write_line("");
+    } else if eq_cmd(cmd, b"clear") {
+        for _ in 0..20 {
+            uart::write_line("");
+        }
+    } else if eq_cmd(cmd, b"echo") {
+        uart::write_bytes(args);
+        uart::write_line("");
+    } else if eq_cmd(cmd, b"alloc") {
+        // Parse decimal size from args
+        let mut n: usize = 0;
+        let mut ok = false;
+        for &b in args {
+            if b >= b'0' && b <= b'9' {
+                ok = true;
+                let d = (b - b'0') as usize;
+                n = n.saturating_mul(10).saturating_add(d);
+            } else if b == b' ' || b == b'\t' {
+                if ok { break; }
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if ok && n > 0 {
+            // Allocate and leak
+            let mut v: Vec<u8> = Vec::with_capacity(n);
+            v.resize(n, 0);
+            core::mem::forget(v);
+            uart::write_str("Allocated ");
+            uart::write_u64(n as u64);
+            uart::write_line(" bytes (leaked).");
+        } else {
+            uart::write_line("Usage: alloc <bytes>");
+        }
+    } else {
+        uart::write_str("Unknown command: ");
+        uart::write_bytes(cmd);
+        uart::write_line("");
+    }
+}
+
+fn eq_cmd(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+</file>
+
+<file path="kernel/src/uart.rs">
+use core::fmt::{self, Write};
+
+const UART_BASE: usize = 0x1000_0000;
+
+pub struct Console;
+
+impl Console {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    #[inline(always)]
+    fn data_reg() -> *mut u8 {
+        UART_BASE as *mut u8
+    }
+
+    pub fn write_byte(&mut self, byte: u8) {
+        unsafe {
+            core::ptr::write_volatile(Self::data_reg(), byte);
+        }
+    }
+
+    pub fn read_byte(&self) -> u8 {
+        unsafe { core::ptr::read_volatile(Self::data_reg() as *const u8) }
+    }
+}
+
+impl Write for Console {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            self.write_byte(byte);
+        }
+        Ok(())
+    }
+}
+
+/// Write a raw string to the UART without using `core::fmt`.
+pub fn write_str(s: &str) {
+    let mut console = Console::new();
+    let _ = console.write_str(s);
+}
+
+/// Write a raw string followed by `\n`.
+pub fn write_line(s: &str) {
+    write_str(s);
+    write_str("\n");
+}
+
+/// Write a raw byte slice to the UART.
+pub fn write_bytes(bytes: &[u8]) {
+    let mut console = Console::new();
+    for &b in bytes {
+        console.write_byte(b);
+    }
+}
+
+/// Write an unsigned integer in decimal.
+pub fn write_u64(mut n: u64) {
+    let mut console = Console::new();
+
+    if n == 0 {
+        console.write_byte(b'0');
+        return;
+    }
+
+    let mut buf = [0u8; 20]; // enough for u64
+    let mut i = 0;
+
+    while n > 0 && i < buf.len() {
+        let digit = (n % 10) as u8;
+        buf[i] = b'0' + digit;
+        n /= 10;
+        i += 1;
+    }
+
+    while i > 0 {
+        i -= 1;
+        console.write_byte(buf[i]);
+    }
+}
+
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => ({
+        $crate::uart::print_fmt(core::format_args!($($arg)*));
+    });
+}
+
+#[macro_export]
+macro_rules! println {
+    () => ($crate::print!("\n"));
+    ($fmt:expr $(, $($arg:tt)*)?) => ({
+        $crate::uart::print_fmt(core::format_args!(concat!($fmt, "\n") $(, $($arg)*)?));
+    });
+}
+</file>
+
+<file path="kernel/build.rs">
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+
+fn main() {
+    println!("cargo:rerun-if-changed=memory.x");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let target_script = out_dir.join("memory.x");
+    fs::copy("memory.x", &target_script).expect("failed to copy memory.x");
+    let link_script = out_dir.join("link.x");
+    fs::copy("link.x", &link_script).expect("failed to copy link.x");
+    println!("cargo:rustc-link-search={}", out_dir.display());
+    println!("cargo:rustc-link-arg=-T{}", target_script.display());
+    println!("cargo:rustc-link-arg=-T{}", link_script.display());
+    println!("cargo:rerun-if-changed=build.rs");
+}
+</file>
+
+<file path="kernel/Cargo.toml">
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+riscv = "0.10.1"
+riscv-rt = "0.11.0"
+panic-halt = "0.2.0"
+
+[profile.release]
+strip = true
+lto = true
+</file>
+
+<file path="kernel/link.x">
+PROVIDE(_stext = ORIGIN(REGION_TEXT));
+PROVIDE(_stack_start = ORIGIN(REGION_STACK) + LENGTH(REGION_STACK));
+PROVIDE(_max_hart_id = 0);
+PROVIDE(_hart_stack_size = 128K);
+PROVIDE(_heap_size = 128K);
+
+PROVIDE(UserSoft = DefaultHandler);
+PROVIDE(SupervisorSoft = DefaultHandler);
+PROVIDE(MachineSoft = DefaultHandler);
+PROVIDE(UserTimer = DefaultHandler);
+PROVIDE(SupervisorTimer = DefaultHandler);
+PROVIDE(MachineTimer = DefaultHandler);
+PROVIDE(UserExternal = DefaultHandler);
+PROVIDE(SupervisorExternal = DefaultHandler);
+PROVIDE(MachineExternal = DefaultHandler);
+
+PROVIDE(DefaultHandler = DefaultInterruptHandler);
+PROVIDE(ExceptionHandler = DefaultExceptionHandler);
+
+/* # Pre-initialization function */
+/* If the user overrides this using the `#[pre_init]` attribute or by creating a `__pre_init` function,
+   then the function this points to will be called before the RAM is initialized. */
+PROVIDE(__pre_init = default_pre_init);
+
+/* A PAC/HAL defined routine that should initialize custom interrupt controller if needed. */
+PROVIDE(_setup_interrupts = default_setup_interrupts);
+
+/* # Multi-processing hook function
+   fn _mp_hook() -> bool;
+
+   This function is called from all the harts and must return true only for one hart,
+   which will perform memory initialization. For other harts it must return false
+   and implement wake-up in platform-dependent way (e.g. after waiting for a user interrupt).
+*/
+PROVIDE(_mp_hook = default_mp_hook);
+
+/* # Start trap function override
+  By default uses the riscv crates default trap handler
+  but by providing the `_start_trap` symbol external crates can override.
+*/
+PROVIDE(_start_trap = default_start_trap);
+
+SECTIONS
+{
+  .text.dummy (NOLOAD) :
+  {
+    /* This section is intended to make _stext address work */
+    . = ABSOLUTE(_stext);
+  } > REGION_TEXT
+
+  .text _stext :
+  {
+    /* Put reset handler first in .text section so it ends up as the entry */
+    /* point of the program. */
+    KEEP(*(.init));
+    KEEP(*(.init.rust));
+    . = ALIGN(4);
+    *(.trap);
+    *(.trap.rust);
+
+    *(.text .text.*);
+  } > REGION_TEXT
+
+  .rodata : ALIGN(4)
+  {
+    *(.srodata .srodata.*);
+    *(.rodata .rodata.*);
+
+    /* 4-byte align the end (VMA) of this section.
+       This is required by LLD to ensure the LMA of the following .data
+       section will have the correct alignment. */
+    . = ALIGN(4);
+  } > REGION_RODATA
+
+  .data : ALIGN(4)
+  {
+    _sidata = LOADADDR(.data);
+    _sdata = .;
+    /* Must be called __global_pointer$ for linker relaxations to work. */
+    PROVIDE(__global_pointer$ = . + 0x800);
+    *(.sdata .sdata.* .sdata2 .sdata2.*);
+    *(.data .data.*);
+    . = ALIGN(4);
+    _edata = .;
+  } > REGION_DATA AT > REGION_RODATA
+
+  .bss (NOLOAD) :
+  {
+    _sbss = .;
+    *(.sbss .sbss.* .bss .bss.*);
+    . = ALIGN(4);
+    _ebss = .;
+  } > REGION_BSS
+
+  /* fictitious region that represents the memory available for the heap */
+  .heap (NOLOAD) :
+  {
+    _sheap = .;
+    . += _heap_size;
+    . = ALIGN(4);
+    _eheap = .;
+  } > REGION_HEAP
+
+  /* fictitious region that represents the memory available for the stack */
+  .stack (NOLOAD) :
+  {
+    _estack = .;
+    . = ABSOLUTE(_stack_start);
+    _sstack = .;
+  } > REGION_STACK
+
+  /* fake output .got section */
+  /* Dynamic relocations are unsupported. This section is only used to detect
+     relocatable code in the input files and raise an error if relocatable code
+     is found */
+  .got (INFO) :
+  {
+    KEEP(*(.got .got.*));
+  }
+
+  /DISCARD/ :
+  {
+    *(.eh_frame)
+    *(.eh_frame_hdr)
+  }
+}
+
+/* Do not exceed this mark in the error messages above                                    | */
+ASSERT(ORIGIN(REGION_TEXT) % 4 == 0, "
+ERROR(riscv-rt): the start of the REGION_TEXT must be 4-byte aligned");
+
+ASSERT(ORIGIN(REGION_RODATA) % 4 == 0, "
+ERROR(riscv-rt): the start of the REGION_RODATA must be 4-byte aligned");
+
+ASSERT(ORIGIN(REGION_DATA) % 4 == 0, "
+ERROR(riscv-rt): the start of the REGION_DATA must be 4-byte aligned");
+
+ASSERT(ORIGIN(REGION_HEAP) % 4 == 0, "
+ERROR(riscv-rt): the start of the REGION_HEAP must be 4-byte aligned");
+
+ASSERT(ORIGIN(REGION_TEXT) % 4 == 0, "
+ERROR(riscv-rt): the start of the REGION_TEXT must be 4-byte aligned");
+
+ASSERT(ORIGIN(REGION_STACK) % 4 == 0, "
+ERROR(riscv-rt): the start of the REGION_STACK must be 4-byte aligned");
+
+ASSERT(_stext % 4 == 0, "
+ERROR(riscv-rt): `_stext` must be 4-byte aligned");
+
+ASSERT(_sdata % 4 == 0 && _edata % 4 == 0, "
+BUG(riscv-rt): .data is not 4-byte aligned");
+
+ASSERT(_sidata % 4 == 0, "
+BUG(riscv-rt): the LMA of .data is not 4-byte aligned");
+
+ASSERT(_sbss % 4 == 0 && _ebss % 4 == 0, "
+BUG(riscv-rt): .bss is not 4-byte aligned");
+
+ASSERT(_sheap % 4 == 0, "
+BUG(riscv-rt): start of .heap is not 4-byte aligned");
+
+ASSERT(_stext + SIZEOF(.text) < ORIGIN(REGION_TEXT) + LENGTH(REGION_TEXT), "
+ERROR(riscv-rt): The .text section must be placed inside the REGION_TEXT region.
+Set _stext to an address smaller than 'ORIGIN(REGION_TEXT) + LENGTH(REGION_TEXT)'");
+
+ASSERT(SIZEOF(.stack) > (_max_hart_id + 1) * _hart_stack_size, "
+ERROR(riscv-rt): .stack section is too small for allocating stacks for all the harts.
+Consider changing `_max_hart_id` or `_hart_stack_size`.");
+
+ASSERT(SIZEOF(.got) == 0, "
+.got section detected in the input files. Dynamic relocations are not
+supported. If you are linking to C code compiled using the `gcc` crate
+then modify your build script to compile the C code _without_ the
+-fPIC flag. See the documentation of the `gcc::Config.fpic` method for
+details.");
+
+/* Do not exceed this mark in the error messages above                                    | */
+</file>
+
+<file path="kernel/memory.x">
+MEMORY
+{
+    /* 
+     * RAM starts at 0x80000000.
+     * We allocate 512MB.
+     */
+    RAM : ORIGIN = 0x80000000, LENGTH = 512M
+}
+
+REGION_ALIAS("REGION_TEXT", RAM);
+REGION_ALIAS("REGION_RODATA", RAM);
+REGION_ALIAS("REGION_DATA", RAM);
+REGION_ALIAS("REGION_BSS", RAM);
+REGION_ALIAS("REGION_HEAP", RAM);
+REGION_ALIAS("REGION_STACK", RAM);
+</file>
+
+<file path="vm/.cargo/config.toml">
+[_unstable]
+unstable-options = true
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+    # Limit maximum linear memory to 1 GiB to support 512 MiB DRAM.
+    "-C", "link-arg=--max-memory=1073741824",
+]
+</file>
+
+<file path="vm/src/bus.rs">
+use crate::dram::{Dram, MemoryError};
+use crate::uart::Uart;
+
+pub const DRAM_BASE: u64 = 0x8000_0000;
+// Use a smaller DRAM size for Wasm to avoid excessive linear memory allocation.
+#[cfg(target_arch = "wasm32")]
+pub const DRAM_SIZE: u64 = 512 * 1024 * 1024; // 512MB for browser environments
+#[cfg(not(target_arch = "wasm32"))]
+pub const DRAM_SIZE: u64 = 512 * 1024 * 1024; // 512MB for native builds
+pub const UART_BASE: u64 = 0x1000_0000;
+pub const UART_SIZE: u64 = 0x100; // Arbitrary small size for now
+pub const STATS_MMIO_BASE: u64 = 0x2000_0000;
+
+pub struct Bus {
+    pub dram: Dram,
+    pub uart: Uart,
+    pub used_memory: u64,
+}
+
+impl Bus {
+    pub fn new() -> Self {
+        Self {
+            dram: Dram::new(DRAM_SIZE as usize),
+            uart: Uart::new(),
+            used_memory: 0,
+        }
+    }
+
+    pub fn load(&mut self, addr: u64, size: u64) -> Result<u64, MemoryError> {
+        if addr >= DRAM_BASE && addr + size <= DRAM_BASE + DRAM_SIZE {
+            let offset = addr - DRAM_BASE;
+            return self.dram.load(offset, size);
+        }
+        if addr >= UART_BASE && addr + size <= UART_BASE + UART_SIZE {
+            return self.uart.load(addr - UART_BASE, size);
+        }
+        if addr == STATS_MMIO_BASE {
+            // Optional: allow reads back of the last reported value
+            return Ok(self.used_memory);
+        }
+        Err(MemoryError::OutOfBounds(addr))
+    }
+
+    pub fn store(&mut self, addr: u64, size: u64, value: u64) -> Result<(), MemoryError> {
+        if addr == STATS_MMIO_BASE {
+            // Accept 4 or 8 byte writes and capture the reported usage
+            self.used_memory = if size >= 8 { value } else { value & 0xffff_ffff };
+            return Ok(());
+        }
+        if addr >= DRAM_BASE && addr + size <= DRAM_BASE + DRAM_SIZE {
+            let offset = addr - DRAM_BASE;
+            return self.dram.store(offset, size, value);
+        }
+        if addr >= UART_BASE && addr + size <= UART_BASE + UART_SIZE {
+            return self.uart.store(addr - UART_BASE, size, value);
+        }
+        Err(MemoryError::OutOfBounds(addr))
+    }
+
+    // Initialize memory from a byte slice (used for loading binaries)
+    pub fn initialize_dram(&mut self, data: &[u8]) -> Result<(), MemoryError> {
+        self.write_bytes(DRAM_BASE, data)
+    }
+
+    pub fn write_bytes(&mut self, addr: u64, data: &[u8]) -> Result<(), MemoryError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let end = addr
+            .checked_add(data.len() as u64)
+            .ok_or(MemoryError::OutOfBounds(addr))?;
+
+        if addr >= DRAM_BASE && end <= DRAM_BASE + DRAM_SIZE {
+            self.dram.write_bytes(addr - DRAM_BASE, data)
+        } else {
+            Err(MemoryError::OutOfBounds(addr))
+        }
+    }
+
+    pub fn fill_bytes(&mut self, addr: u64, len: usize, value: u8) -> Result<(), MemoryError> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let end = addr
+            .checked_add(len as u64)
+            .ok_or(MemoryError::OutOfBounds(addr))?;
+
+        if addr >= DRAM_BASE && end <= DRAM_BASE + DRAM_SIZE {
+            self.dram.fill(addr - DRAM_BASE, len, value)
+        } else {
+            Err(MemoryError::OutOfBounds(addr))
+        }
+    }
+}
+</file>
+
+<file path="vm/src/cpu.rs">
+use crate::bus::Bus;
+use crate::bus::DRAM_BASE;
+
+pub struct Cpu {
+    pub regs: [u64; 32],
+    pub pc: u64,
+    pub bus: Bus,
+    pub csrs: [u64; 4096],
+    pub last_pc: u64,
+    pub last_inst: u32,
+}
+
+impl Cpu {
+    pub fn new(bus: Bus) -> Self {
+        Self {
+            regs: [0; 32],
+            pc: DRAM_BASE,
+            bus,
+            csrs: [0; 4096],
+            last_pc: DRAM_BASE,
+            last_inst: 0,
+        }
+    }
+
+    pub fn fetch(&mut self) -> Result<u32, String> {
+        match self.bus.load(self.pc, 4) {
+            Ok(val) => Ok(val as u32),
+            Err(_) => {
+                // Optimization for edge case: if 32-bit load failed (e.g. end of memory),
+                // try 16-bit load for compressed instructions.
+                let val = self
+                    .bus
+                    .load(self.pc, 2)
+                    .map_err(|e| format!("Instruction access fault at {:#x}: {}", self.pc, e))?;
+                let val = val as u32;
+                // If it's a 32-bit instruction (ends in 11) but we could only load 16 bits, fail.
+                if val & 0x3 == 0x3 {
+                    return Err(format!(
+                        "Instruction access fault (32-bit instruction at end of memory) at {:#x}",
+                        self.pc
+                    ));
+                }
+                Ok(val)
+            }
+        }
+    }
+
+    pub fn execute(&mut self, inst: u32) -> Result<(), String> {
+        // Check for Compressed Instruction (16-bit)
+        // Standard instructions have bits [1:0] == 11
+        if inst & 0x3 != 0x3 {
+            return self.execute_compressed(inst as u16);
+        }
+
+        let opcode = inst & 0x7f;
+        let rd = ((inst >> 7) & 0x1f) as usize;
+        let rs1 = ((inst >> 15) & 0x1f) as usize;
+        let rs2 = ((inst >> 20) & 0x1f) as usize;
+        let funct3 = (inst >> 12) & 0x7;
+        let funct7 = (inst >> 25) & 0x7f;
+
+        // Register x0 is always 0. We can enforce this by writing 0 to it after every instruction
+        // or by handling it in write_reg.
+        // Writing 0 to it effectively discards the result.
+
+        match opcode {
+            // LUI (Load Upper Immediate)
+            0x37 => {
+                let imm = (inst as u64) & 0xfffff000; // Bits 12-31
+                // Sign-extension for 64-bit: result is sign-extended 32-bit value
+                let imm = imm as i32 as i64 as u64;
+                self.write_reg(rd, imm);
+                self.pc = self.pc.wrapping_add(4);
+            }
+            // AUIPC (Add Upper Immediate to PC)
+            0x17 => {
+                let imm = (inst as u64) & 0xfffff000;
+                let imm = imm as i32 as i64 as u64;
+                self.write_reg(rd, self.pc.wrapping_add(imm));
+                self.pc = self.pc.wrapping_add(4);
+            }
+            // JAL (Jump and Link)
+            0x6f => {
+                // J-immediate
+                let imm20 = ((inst >> 31) & 0x1) as u64;
+                let imm10_1 = ((inst >> 21) & 0x3ff) as u64;
+                let imm11 = ((inst >> 20) & 0x1) as u64;
+                let imm19_12 = ((inst >> 12) & 0xff) as u64;
+
+                let mut imm = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
+                // Sign extend from bit 20
+                if (imm >> 20) & 1 == 1 {
+                    imm |= 0xffffffff_ffe00000; // Sign extension for bits 21-63
+                }
+
+                // Store return address
+                self.write_reg(rd, self.pc.wrapping_add(4));
+
+                // Jump
+                self.pc = self.pc.wrapping_add(imm);
+            }
+            // JALR (Jump and Link Register)
+            0x67 => {
+                // I-immediate
+                let imm = ((inst as i32) >> 20) as i64 as u64;
+
+                let t = self.pc.wrapping_add(4);
+                let target = self.read_reg(rs1).wrapping_add(imm) & !1;
+
+                self.write_reg(rd, t);
+                self.pc = target;
+            }
+            // Branch Instructions (B-Type)
+            0x63 => {
+                let offset = Self::decode_branch_offset(inst);
+                let rs1_val = self.read_reg(rs1);
+                let rs2_val = self.read_reg(rs2);
+
+                let take_branch = match funct3 {
+                    0x0 => rs1_val == rs2_val,                   // BEQ
+                    0x1 => rs1_val != rs2_val,                   // BNE
+                    0x4 => (rs1_val as i64) < (rs2_val as i64),  // BLT
+                    0x5 => (rs1_val as i64) >= (rs2_val as i64), // BGE
+                    0x6 => rs1_val < rs2_val,                    // BLTU
+                    0x7 => rs1_val >= rs2_val,                   // BGEU
+                    _ => return Err(format!("Unimplemented branch funct3: {:x}", funct3)),
+                };
+
+                if take_branch {
+                    self.pc = self.pc.wrapping_add(offset as u64);
+                } else {
+                    self.pc = self.pc.wrapping_add(4);
+                }
+            }
+            // Load Instructions (I-Type)
+            0x03 => {
+                let imm = ((inst as i32) >> 20) as i64 as u64;
+                let addr = self.read_reg(rs1).wrapping_add(imm);
+
+                match funct3 {
+                    0x0 => { // LB
+                        let val = self.bus.load(addr, 1).map_err(|e| format!("Load fault: {}", e))?;
+                        let val = (val as i8) as i64 as u64;
+                        self.write_reg(rd, val);
+                    }
+                    0x1 => { // LH
+                        let val = self.bus.load(addr, 2).map_err(|e| format!("Load fault: {}", e))?;
+                        let val = (val as i16) as i32 as i64 as u64;
+                        self.write_reg(rd, val);
+                    }
+                    0x2 => {
+                        // LW
+                        let val = self
+                            .bus
+                            .load(addr, 4)
+                            .map_err(|e| format!("Load fault: {}", e))?;
+                        // LW loads a 32-bit value and sign-extends it to 64-bits
+                        let val = (val as i32) as i64 as u64;
+                        self.write_reg(rd, val);
+                    }
+                    0x3 => {
+                        // LD
+                        let val = self
+                            .bus
+                            .load(addr, 8)
+                            .map_err(|e| format!("Load fault: {}", e))?;
+                        self.write_reg(rd, val);
+                    }
+                    0x4 => { // LBU
+                        let val = self.bus.load(addr, 1).map_err(|e| format!("Load fault: {}", e))?;
+                        self.write_reg(rd, val);
+                    }
+                    0x5 => { // LHU
+                        let val = self.bus.load(addr, 2).map_err(|e| format!("Load fault: {}", e))?;
+                        self.write_reg(rd, val);
+                    }
+                    0x6 => { // LWU
+                        let val = self.bus.load(addr, 4).map_err(|e| format!("Load fault: {}", e))?;
+                        self.write_reg(rd, val);
+                    }
+                    // Others like LB, LH, LBU, LHU not requested yet
+                    _ => return Err(format!("Unimplemented load funct3: {:x}", funct3)),
+                }
+                self.pc = self.pc.wrapping_add(4);
+            }
+            // Store Instructions (S-Type)
+            0x23 => {
+                // S-immediate
+                let imm11_5 = (inst >> 25) & 0x7f;
+                let imm4_0 = (inst >> 7) & 0x1f;
+                let imm = (imm11_5 << 5) | imm4_0;
+                // Sign extend 12-bit immediate
+                let imm = if (imm >> 11) & 1 == 1 {
+                    imm | 0xfffff000
+                } else {
+                    imm
+                };
+                let imm = (imm as i32) as i64 as u64; // Sign extend to 64 bits
+
+                let addr = self.read_reg(rs1).wrapping_add(imm);
+                let val = self.read_reg(rs2);
+
+                match funct3 {
+                    0x0 => { // SB
+                        let val = self.read_reg(rs2);
+                        self.bus.store(addr, 1, val).map_err(|e| format!("Store fault: {}", e))?;
+                    }
+                    0x1 => { // SH
+                        let val = self.read_reg(rs2);
+                        self.bus.store(addr, 2, val).map_err(|e| format!("Store fault: {}", e))?;
+                    }
+                    0x2 => {
+                        // SW
+                        self.bus
+                            .store(addr, 4, val)
+                            .map_err(|e| format!("Store fault: {}", e))?;
+                    }
+                    0x3 => {
+                        // SD
+                        self.bus
+                            .store(addr, 8, val)
+                            .map_err(|e| format!("Store fault: {}", e))?;
+                    }
+                    // Others like SB, SH not requested yet
+                    _ => return Err(format!("Unimplemented store funct3: {:x}", funct3)),
+                }
+                self.pc = self.pc.wrapping_add(4);
+            }
+            // Integer Register-Immediate Instructions (I-Type, RV64I)
+            0x13 => {
+                let imm = ((inst as i32) >> 20) as i64 as u64;
+                match funct3 {
+                    0x0 => {
+                        // ADDI
+                        let val = self.read_reg(rs1).wrapping_add(imm);
+                        self.write_reg(rd, val);
+                    }
+                    0x1 => {
+                        // SLLI
+                        let shamt = imm & 0x3f;
+                        let val = self.read_reg(rs1) << shamt;
+                        self.write_reg(rd, val);
+                    }
+                    0x2 => {
+                        // SLTI
+                        let rs1_val = self.read_reg(rs1) as i64;
+                        let imm_val = imm as i64;
+                        let result = if rs1_val < imm_val { 1 } else { 0 };
+                        self.write_reg(rd, result);
+                    }
+                    0x3 => {
+                        // SLTIU
+                        let rs1_val = self.read_reg(rs1);
+                        let imm_val = imm;
+                        let result = if rs1_val < imm_val { 1 } else { 0 };
+                        self.write_reg(rd, result);
+                    }
+                    0x4 => {
+                        // XORI
+                        let val = self.read_reg(rs1) ^ imm;
+                        self.write_reg(rd, val);
+                    }
+                    0x5 => {
+                        // SRLI and SRAI
+                        let shamt = imm & 0x3f;
+                        if (inst >> 30) & 1 == 0 {
+                            // SRLI
+                            let val = self.read_reg(rs1) >> shamt;
+                            self.write_reg(rd, val);
+                        } else {
+                            // SRAI
+                            let val = (self.read_reg(rs1) as i64) >> shamt;
+                            self.write_reg(rd, val as u64);
+                        }
+                    }
+                    0x6 => {
+                        // ORI
+                        let val = self.read_reg(rs1) | imm;
+                        self.write_reg(rd, val);
+                    }
+                    0x7 => {
+                        // ANDI
+                        let val = self.read_reg(rs1) & imm;
+                        self.write_reg(rd, val);
+                    }
+                    _ => return Err(format!("Unimplemented OP-IMM funct3: {:x}", funct3)),
+                }
+                self.pc = self.pc.wrapping_add(4);
+            }
+            // Integer Register-Immediate Instructions (I-Type, 32-bit ops for RV64I)
+            0x1b => {
+                let imm = ((inst as i32) >> 20) as i32;
+                match funct3 {
+                    0x0 => {
+                        // ADDIW
+                        let rs1_val = self.read_reg(rs1) as i32;
+                        let result = rs1_val.wrapping_add(imm);
+                        self.write_reg(rd, result as i64 as u64);
+                    }
+                    0x1 => {
+                        // SLLIW
+                        let shamt = ((inst >> 20) & 0x1f) as u32;
+                        let rs1_val = self.read_reg(rs1) as i32;
+                        let result = rs1_val.wrapping_shl(shamt);
+                        self.write_reg(rd, result as i64 as u64);
+                    }
+                    0x5 => {
+                        // SRLIW and SRAIW
+                        let shamt = ((inst >> 20) & 0x1f) as u32;
+                        let rs1_val = self.read_reg(rs1) as i32;
+                        let result = if (inst >> 30) & 1 == 0 {
+                            // SRLIW (logical right shift)
+                            ((rs1_val as u32) >> shamt) as i32
+                        } else {
+                            // SRAIW (arithmetic right shift)
+                            rs1_val.wrapping_shr(shamt)
+                        };
+                        self.write_reg(rd, result as i64 as u64);
+                    }
+                    _ => return Err(format!("Unimplemented OP-IMM-32 funct3: {:x}", funct3)),
+                }
+                self.pc = self.pc.wrapping_add(4);
+            }
+            // Integer Register-Register Instructions (R-Type, RV64I)
+            0x33 => {
+                match (funct3, funct7) {
+                    (0x0, 0x00) => {
+                        // ADD
+                        let val = self.read_reg(rs1).wrapping_add(self.read_reg(rs2));
+                        self.write_reg(rd, val);
+                    }
+                    (0x0, 0x20) => {
+                        // SUB
+                        let val = self.read_reg(rs1).wrapping_sub(self.read_reg(rs2));
+                        self.write_reg(rd, val);
+                    }
+                    (0x1, 0x00) => {
+                        // SLL
+                        let shamt = self.read_reg(rs2) & 0x3f;
+                        let val = self.read_reg(rs1) << shamt;
+                        self.write_reg(rd, val);
+                    }
+                    (0x2, 0x00) => {
+                        // SLT
+                        let rs1_val = self.read_reg(rs1) as i64;
+                        let rs2_val = self.read_reg(rs2) as i64;
+                        let result = if rs1_val < rs2_val { 1 } else { 0 };
+                        self.write_reg(rd, result);
+                    }
+                    (0x3, 0x00) => {
+                        // SLTU
+                        let rs1_val = self.read_reg(rs1);
+                        let rs2_val = self.read_reg(rs2);
+                        let result = if rs1_val < rs2_val { 1 } else { 0 };
+                        self.write_reg(rd, result);
+                    }
+                    (0x4, 0x00) => {
+                        // XOR
+                        let val = self.read_reg(rs1) ^ self.read_reg(rs2);
+                        self.write_reg(rd, val);
+                    }
+                    (0x5, 0x00) => {
+                        // SRL
+                        let shamt = self.read_reg(rs2) & 0x3f;
+                        let val = self.read_reg(rs1) >> shamt;
+                        self.write_reg(rd, val);
+                    }
+                    (0x5, 0x20) => {
+                        // SRA
+                        let shamt = self.read_reg(rs2) & 0x3f;
+                        let val = (self.read_reg(rs1) as i64) >> shamt;
+                        self.write_reg(rd, val as u64);
+                    }
+                    (0x6, 0x00) => {
+                        // OR
+                        let val = self.read_reg(rs1) | self.read_reg(rs2);
+                        self.write_reg(rd, val);
+                    }
+                    (0x7, 0x00) => {
+                        // AND
+                        let val = self.read_reg(rs1) & self.read_reg(rs2);
+                        self.write_reg(rd, val);
+                    }
+                    // M Extension
+                    (0x0, 0x01) => { // MUL
+                        let val = self.read_reg(rs1).wrapping_mul(self.read_reg(rs2));
+                        self.write_reg(rd, val);
+                    }
+                    (0x1, 0x01) => { // MULH
+                        let val = (self.read_reg(rs1) as i128 * self.read_reg(rs2) as i128) >> 64;
+                        self.write_reg(rd, val as u64);
+                    }
+                    (0x2, 0x01) => { // MULHSU
+                         let val = (self.read_reg(rs1) as i128 * self.read_reg(rs2) as u128 as i128) >> 64;
+                         self.write_reg(rd, val as u64);
+                    }
+                    (0x3, 0x01) => { // MULHU
+                         let val = (self.read_reg(rs1) as u128 * self.read_reg(rs2) as u128) >> 64;
+                         self.write_reg(rd, val as u64);
+                    }
+                    (0x4, 0x01) => { // DIV
+                         let rs1_val = self.read_reg(rs1) as i64;
+                         let rs2_val = self.read_reg(rs2) as i64;
+                         if rs2_val == 0 {
+                             self.write_reg(rd, (-1i64) as u64); // Division by zero -> -1
+                         } else if rs1_val == i64::MIN && rs2_val == -1 {
+                             self.write_reg(rd, rs1_val as u64); // Overflow -> MIN
+                         } else {
+                             self.write_reg(rd, (rs1_val / rs2_val) as u64);
+                         }
+                    }
+                    (0x5, 0x01) => { // DIVU
+                         let rs2_val = self.read_reg(rs2);
+                         if rs2_val == 0 {
+                             self.write_reg(rd, u64::MAX);
+                         } else {
+                             self.write_reg(rd, self.read_reg(rs1) / rs2_val);
+                         }
+                    }
+                    (0x6, 0x01) => { // REM
+                         let rs1_val = self.read_reg(rs1) as i64;
+                         let rs2_val = self.read_reg(rs2) as i64;
+                         if rs2_val == 0 {
+                             self.write_reg(rd, rs1_val as u64);
+                         } else if rs1_val == i64::MIN && rs2_val == -1 {
+                             self.write_reg(rd, 0);
+                         } else {
+                             self.write_reg(rd, (rs1_val % rs2_val) as u64);
+                         }
+                    }
+                    (0x7, 0x01) => { // REMU
+                         let rs2_val = self.read_reg(rs2);
+                         if rs2_val == 0 {
+                             self.write_reg(rd, self.read_reg(rs1));
+                         } else {
+                             self.write_reg(rd, self.read_reg(rs1) % rs2_val);
+                         }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Unimplemented OP funct3: {:x} funct7: {:x}",
+                            funct3, funct7
+                        ));
+                    }
+                }
+                self.pc = self.pc.wrapping_add(4);
+            }
+            // Integer Register-Register Instructions (R-Type, 32-bit ops for RV64I)
+            0x3b => {
+                match (funct3, funct7) {
+                    (0x0, 0x00) => {
+                        // ADDW
+                        let rs1_val = self.read_reg(rs1) as i32;
+                        let rs2_val = self.read_reg(rs2) as i32;
+                        let result = rs1_val.wrapping_add(rs2_val);
+                        self.write_reg(rd, result as i64 as u64);
+                    }
+                    (0x0, 0x20) => {
+                        // SUBW
+                        let rs1_val = self.read_reg(rs1) as i32;
+                        let rs2_val = self.read_reg(rs2) as i32;
+                        let result = rs1_val.wrapping_sub(rs2_val);
+                        self.write_reg(rd, result as i64 as u64);
+                    }
+                    (0x1, 0x00) => {
+                        // SLLW
+                        let shamt = (self.read_reg(rs2) & 0x1f) as u32;
+                        let rs1_val = self.read_reg(rs1) as i32;
+                        let result = rs1_val.wrapping_shl(shamt);
+                        self.write_reg(rd, result as i64 as u64);
+                    }
+                    (0x5, 0x00) => {
+                        // SRLW
+                        let shamt = (self.read_reg(rs2) & 0x1f) as u32;
+                        let rs1_val = self.read_reg(rs1) as i32;
+                        let result = ((rs1_val as u32) >> shamt) as i32;
+                        self.write_reg(rd, result as i64 as u64);
+                    }
+                    (0x5, 0x20) => {
+                        // SRAW
+                        let shamt = (self.read_reg(rs2) & 0x1f) as u32;
+                        let rs1_val = self.read_reg(rs1) as i32;
+                        let result = rs1_val.wrapping_shr(shamt);
+                        self.write_reg(rd, result as i64 as u64);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Unimplemented OP-32 funct3: {:x} funct7: {:x}",
+                            funct3, funct7
+                        ));
+                    }
+                }
+                self.pc = self.pc.wrapping_add(4);
+            }
+            // SYSTEM Instructions (CSRs, etc.)
+            0x73 => {
+                let csr_addr = (inst >> 20) as usize;
+                let uimm = rs1 as u64; // For immediate forms
+
+                match funct3 {
+                    0x1 => { // CSRRW (Atomic Read/Write CSR)
+                        let old_val = self.read_csr(csr_addr);
+                        self.write_csr(csr_addr, self.read_reg(rs1));
+                        self.write_reg(rd, old_val);
+                        self.pc = self.pc.wrapping_add(4);
+                    }
+                    0x2 => { // CSRRS (Atomic Read and Set Bits in CSR)
+                        let old_val = self.read_csr(csr_addr);
+                        self.write_csr(csr_addr, old_val | self.read_reg(rs1));
+                        self.write_reg(rd, old_val);
+                        self.pc = self.pc.wrapping_add(4);
+                    }
+                    0x3 => { // CSRRC (Atomic Read and Clear Bits in CSR)
+                         let old_val = self.read_csr(csr_addr);
+                         self.write_csr(csr_addr, old_val & !self.read_reg(rs1));
+                         self.write_reg(rd, old_val);
+                         self.pc = self.pc.wrapping_add(4);
+                    }
+                    0x5 => { // CSRRWI
+                         let old_val = self.read_csr(csr_addr);
+                         self.write_csr(csr_addr, uimm);
+                         self.write_reg(rd, old_val);
+                         self.pc = self.pc.wrapping_add(4);
+                    }
+                    0x6 => { // CSRRSI
+                         let old_val = self.read_csr(csr_addr);
+                         self.write_csr(csr_addr, old_val | uimm);
+                         self.write_reg(rd, old_val);
+                         self.pc = self.pc.wrapping_add(4);
+                    }
+                    0x7 => { // CSRRCI
+                         let old_val = self.read_csr(csr_addr);
+                         self.write_csr(csr_addr, old_val & !uimm);
+                         self.write_reg(rd, old_val);
+                         self.pc = self.pc.wrapping_add(4);
+                    }
+                    0x0 => { // PRIV (MRET, etc.)
+                         // Check funct12 (bits 31-20)
+                         // MRET: 0x302
+                         match csr_addr { // reusing csr_addr var which extracts top 12 bits
+                             0x302 => { // MRET
+                                 // pc = mepc
+                                 let mepc = self.read_csr(0x341);
+                                 self.pc = mepc;
+                                 // Don't increment PC
+                             }
+                             0x000 => { // ECALL
+                                 return Err("ECALL encountered".to_string());
+                             }
+                             0x001 => { // EBREAK
+                                 return Err("EBREAK encountered".to_string());
+                             }
+                             0x105 => { // WFI (Wait for Interrupt)
+                                 // Treat as NOP for now, or halt until interrupt (not implemented)
+                                 self.pc = self.pc.wrapping_add(4);
+                             }
+                              _ => return Err(format!("Unimplemented PRIV instruction: {:#x}", inst)),
+                         }
+                    }
+                    _ => return Err(format!("Unimplemented SYSTEM funct3: {:x}", funct3)),
+                }
+            }
+            _ => return Err(format!("Unimplemented opcode: {:#x}", opcode)),
+        }
+        Ok(())
+    }
+
+    fn execute_compressed(&mut self, inst: u16) -> Result<(), String> {
+        let op = inst & 0x3;
+        let funct3 = (inst >> 13) & 0x7;
+
+        match op {
+            0 => { // Quadrant 0
+                match funct3 {
+                    // C.ADDI4SPN (Add Immediate to SP, store in rd')
+                    // Format: 000 | nzuimm[5:4|9:6|2|3] | rd' | 00
+                    0x0 => {
+                         // nzuimm bits:
+                         // inst[12:5] = nzuimm[5:4|9:6|2|3]
+                         // inst[12] -> 5
+                         // inst[11] -> 4
+                         // inst[10:7] -> 9:6
+                         // inst[6] -> 2
+                         // inst[5] -> 3
+                         let imm = ((inst >> 6) & 1) << 2
+                                 | ((inst >> 5) & 1) << 3
+                                 | ((inst >> 11) & 0x3) << 4
+                                 | ((inst >> 7) & 0xf) << 6;
+                         
+                         if imm == 0 {
+                             // Reserved encoding – treat as NOP
+                             self.pc = self.pc.wrapping_add(2);
+                             return Ok(());
+                         }
+                         
+                         let rd_prime = ((inst >> 2) & 0x7) as usize;
+                         let rd = 8 + rd_prime; // x8 to x15
+                         
+                         // rd = sp + imm
+                         let sp = self.read_reg(2);
+                         let val = sp.wrapping_add(imm as u64);
+                         self.write_reg(rd, val);
+                         self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x2 => { // C.LW
+                        // inst[12:10] -> imm[5:3]
+                        // inst[6] -> imm[2]
+                        // inst[5] -> imm[6]
+                        let imm = (((inst >> 10) & 0x7) << 3)
+                                | (((inst >> 6) & 1) << 2)
+                                | (((inst >> 5) & 1) << 6);
+                        
+                        let rs1_prime = ((inst >> 7) & 0x7) as usize;
+                        let rd_prime = ((inst >> 2) & 0x7) as usize;
+                        let rs1 = 8 + rs1_prime;
+                        let rd = 8 + rd_prime;
+
+                        let addr = self.read_reg(rs1).wrapping_add(imm as u64);
+                        let val = self.bus.load(addr, 4).map_err(|e| format!("C.LW load fault: {}", e))?;
+                        let val = (val as i32) as i64 as u64; // Sign-extend
+                        self.write_reg(rd, val);
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x3 => { // C.LD
+                         // inst[12:10] -> imm[5:3]
+                         // inst[6:5] -> imm[7:6]
+                         let imm = (((inst >> 10) & 0x7) << 3)
+                                 | (((inst >> 5) & 0x3) << 6);
+                         
+                         let rs1_prime = ((inst >> 7) & 0x7) as usize;
+                         let rd_prime = ((inst >> 2) & 0x7) as usize;
+                         let rs1 = 8 + rs1_prime;
+                         let rd = 8 + rd_prime;
+
+                         let addr = self.read_reg(rs1).wrapping_add(imm as u64);
+                         let val = self.bus.load(addr, 8).map_err(|e| format!("C.LD load fault: {}", e))?;
+                         self.write_reg(rd, val);
+                         self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x6 => { // C.SW
+                        let imm = (((inst >> 10) & 0x7) << 3)
+                                | (((inst >> 6) & 1) << 2)
+                                | (((inst >> 5) & 1) << 6);
+                        
+                        let rs1_prime = ((inst >> 7) & 0x7) as usize;
+                        let rs2_prime = ((inst >> 2) & 0x7) as usize;
+                        let rs1 = 8 + rs1_prime;
+                        let rs2 = 8 + rs2_prime;
+
+                        let addr = self.read_reg(rs1).wrapping_add(imm as u64);
+                        let val = self.read_reg(rs2);
+                        self.bus.store(addr, 4, val).map_err(|e| format!("C.SW store fault: {}", e))?;
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x7 => { // C.SD
+                         let imm = (((inst >> 10) & 0x7) << 3)
+                                 | (((inst >> 5) & 0x3) << 6);
+                         
+                         let rs1_prime = ((inst >> 7) & 0x7) as usize;
+                         let rs2_prime = ((inst >> 2) & 0x7) as usize;
+                         let rs1 = 8 + rs1_prime;
+                         let rs2 = 8 + rs2_prime;
+
+                         let addr = self.read_reg(rs1).wrapping_add(imm as u64);
+                         let val = self.read_reg(rs2);
+                         self.bus.store(addr, 8, val).map_err(|e| format!("C.SD store fault: {}", e))?;
+                         self.pc = self.pc.wrapping_add(2);
+                    }
+                    _ => {
+                        // Unknown / unimplemented compressed instruction in quadrant 0 – treat as NOP
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                }
+            }
+            1 => { // Quadrant 1
+                 match funct3 {
+                    0x0 => { // C.ADDI / C.NOP
+                         let rd = ((inst >> 7) & 0x1f) as usize;
+                         // imm[5]=12, imm[4:0]=6:2
+                         let imm5 = (inst >> 12) & 1;
+                         let imm4_0 = (inst >> 2) & 0x1f;
+                         let mut imm_val = ((imm5 << 5) | imm4_0) as u32;
+                         // Sign extend 6-bit
+                         if (imm_val >> 5) & 1 == 1 {
+                             imm_val |= 0xffffffc0;
+                         }
+                         let imm = imm_val as i32 as i64;
+                         
+                         if rd != 0 {
+                             let val = self.read_reg(rd).wrapping_add(imm as u64);
+                             self.write_reg(rd, val);
+                         }
+                         // if rd==0, it's NOP
+                         self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x1 => { // C.ADDIW
+                         let rd = ((inst >> 7) & 0x1f) as usize;
+                         if rd == 0 {
+                             // Reserved
+                             return Err(format!("Reserved C.ADDIW with rd=0: {:#x}", inst));
+                         } else {
+                             let imm5 = (inst >> 12) & 1;
+                             let imm4_0 = (inst >> 2) & 0x1f;
+                             let mut imm_val = ((imm5 << 5) | imm4_0) as u32;
+                             if (imm_val >> 5) & 1 == 1 {
+                                 imm_val |= 0xffffffc0;
+                             }
+                             let imm = imm_val as i32 as i64;
+                             
+                             let val = self.read_reg(rd).wrapping_add(imm as u64);
+                             let val = (val as i32) as i64 as u64; // Sign-extend 32-bit result
+                             self.write_reg(rd, val);
+                         }
+                         self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x2 => { // C.LI
+                         let rd = ((inst >> 7) & 0x1f) as usize;
+                         if rd != 0 {
+                             let imm5 = (inst >> 12) & 1;
+                             let imm4_0 = (inst >> 2) & 0x1f;
+                             let mut imm_val = ((imm5 << 5) | imm4_0) as u32;
+                             if (imm_val >> 5) & 1 == 1 {
+                                 imm_val |= 0xffffffc0;
+                             }
+                             let imm = imm_val as i32 as i64 as u64;
+                             self.write_reg(rd, imm);
+                         }
+                         self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x3 => { // C.LUI / C.ADDI16SP
+                         let rd = ((inst >> 7) & 0x1f) as usize;
+                         if rd == 2 {
+                             // C.ADDI16SP
+                             // imm bits in inst: 12, 6, 5, 4, 3, 2.
+                             // Mapping:
+                             // 12 -> 9
+                             // 4:3 -> 8:7
+                             // 5 -> 6
+                             // 2 -> 5
+                             // 6 -> 4
+                             let mut imm_val = (((inst >> 12) & 1) << 9
+                                             | ((inst >> 3) & 0x3) << 7
+                                             | ((inst >> 5) & 1) << 6
+                                             | ((inst >> 2) & 1) << 5
+                                             | ((inst >> 6) & 1) << 4) as u32;
+                             // Sign extend from bit 9
+                             if (imm_val >> 9) & 1 == 1 {
+                                 imm_val |= 0xfffffc00;
+                             }
+                             let imm = imm_val as i32 as i64; // Already scaled (bits are at 9..4)
+                             
+                             // println!("C.ADDI16SP inst={:#x} imm={}", inst, imm);
+                             let val = self.read_reg(2).wrapping_add(imm as u64);
+                             self.write_reg(2, val);
+                         } else if rd != 0 {
+                             // C.LUI
+                             let imm5 = (inst >> 12) & 1;
+                             let imm4_0 = (inst >> 2) & 0x1f;
+                             let mut imm = ((imm5 << 5) | imm4_0) as u32;
+                             if (imm >> 5) & 1 == 1 {
+                                 imm |= 0xffffffc0; // sign extend to 32-bit
+                             }
+                             let val = (imm as i32 as i64 as u64) << 12;
+                             self.write_reg(rd, val);
+                         }
+                         self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x5 => { // C.J
+                         // offset[11]=12, offset[4]=11, offset[9:8]=10:9, offset[10]=8, offset[6]=7, offset[7]=6, offset[3:1]=5:3, offset[5]=2
+                         let offset = ((inst >> 12) & 1) << 11
+                                    | ((inst >> 11) & 1) << 4
+                                    | ((inst >> 9) & 0x3) << 8
+                                    | ((inst >> 8) & 1) << 10
+                                    | ((inst >> 7) & 1) << 6
+                                    | ((inst >> 6) & 1) << 7
+                                    | ((inst >> 3) & 0x7) << 1
+                                    | ((inst >> 2) & 1) << 5;
+                        // Sign extend 12-bit
+                        let mut off_val = offset as u64;
+                        if (offset >> 11) & 1 == 1 {
+                            off_val |= 0xfffffffffffff800;
+                        }
+                        self.pc = self.pc.wrapping_add(off_val);
+                    }
+                    0x6 => { // C.BEQZ
+                         // offset[8]=12, offset[4:3]=11:10, offset[7:6]=6:5, offset[2:1]=4:3, offset[5]=2
+                         let rs1_prime = ((inst >> 7) & 0x7) as usize;
+                         let rs1 = 8 + rs1_prime; // x8-x15
+                         
+                         let off_8 = (inst >> 12) & 1;
+                         let off_4_3 = (inst >> 10) & 0x3;
+                         let off_7_6 = (inst >> 5) & 0x3;
+                         let off_2_1 = (inst >> 3) & 0x3;
+                         let off_5 = (inst >> 2) & 1;
+                         
+                         let offset_val = ((off_8 << 8)
+                                        | (off_7_6 << 6)
+                                        | (off_5 << 5)
+                                        | (off_4_3 << 3)
+                                        | (off_2_1 << 1)) as u32;
+                         // Sign extend 9-bit (bit 8 is sign)
+                         let offset = if off_8 == 1 {
+                             (offset_val | 0xffffff00) as i32 as i64
+                         } else {
+                             offset_val as i64
+                         };
+                         
+                         if self.read_reg(rs1) == 0 {
+                             self.pc = self.pc.wrapping_add(offset as u64);
+                         } else {
+                             self.pc = self.pc.wrapping_add(2);
+                         }
+                    }
+                    0x7 => { // C.BNEZ
+                         let rs1_prime = ((inst >> 7) & 0x7) as usize;
+                         let rs1 = 8 + rs1_prime;
+                         
+                         let off_8 = (inst >> 12) & 1;
+                         let off_4_3 = (inst >> 10) & 0x3;
+                         let off_7_6 = (inst >> 5) & 0x3;
+                         let off_2_1 = (inst >> 3) & 0x3;
+                         let off_5 = (inst >> 2) & 1;
+                         
+                         let offset_val = ((off_8 << 8)
+                                        | (off_7_6 << 6)
+                                        | (off_5 << 5)
+                                        | (off_4_3 << 3)
+                                        | (off_2_1 << 1)) as u32;
+                         let offset = if off_8 == 1 {
+                             (offset_val | 0xffffff00) as i32 as i64
+                         } else {
+                             offset_val as i64
+                         };
+                         
+                         if self.read_reg(rs1) != 0 {
+                             self.pc = self.pc.wrapping_add(offset as u64);
+                         } else {
+                             self.pc = self.pc.wrapping_add(2);
+                         }
+                    }
+                    _ => {
+                        // Unknown / unimplemented compressed instruction in quadrant 1 – treat as NOP
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                 }
+            }
+            2 => { // Quadrant 2
+                match funct3 {
+                    0x0 => { // C.SLLI
+                        let rd = ((inst >> 7) & 0x1f) as usize;
+                        if rd == 0 {
+                            // Reserved encoding – treat as NOP
+                            self.pc = self.pc.wrapping_add(2);
+                            return Ok(());
+                        }
+                        let shamt = ((inst >> 2) & 0x1f) | (((inst >> 12) & 1) << 5);
+                        if shamt == 0 {
+                             // Hint or reserved – treat as NOP
+                             self.pc = self.pc.wrapping_add(2);
+                             return Ok(());
+                        }
+                        let val = self.read_reg(rd) << shamt;
+                        self.write_reg(rd, val);
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x2 => { // C.LWSP
+                        let rd = ((inst >> 7) & 0x1f) as usize;
+                        if rd == 0 {
+                            // Reserved encoding – treat as NOP
+                            self.pc = self.pc.wrapping_add(2);
+                            return Ok(());
+                        }
+                        // offset[5] = inst[12]
+                        // offset[4:2] = inst[6:4]
+                        // offset[7:6] = inst[3:2]
+                        let off_5 = (inst >> 12) & 1;
+                        let off_4_2 = (inst >> 4) & 0x7;
+                        let off_7_6 = (inst >> 2) & 0x3;
+                        let offset = (off_7_6 << 6) | (off_5 << 5) | (off_4_2 << 2);
+                        let addr = self.read_reg(2).wrapping_add(offset as u64); // x2 is SP
+                        
+                        let val = self.bus.load(addr, 4).map_err(|e| format!("C.LWSP load fault: {}", e))?;
+                        // Sign extend 32-bit loaded value
+                        let val = (val as i32) as i64 as u64;
+                        self.write_reg(rd, val);
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x3 => { // C.LDSP
+                        let rd = ((inst >> 7) & 0x1f) as usize;
+                         if rd == 0 {
+                            // Reserved encoding – treat as NOP
+                            self.pc = self.pc.wrapping_add(2);
+                            return Ok(());
+                        }
+                        // offset[5] = inst[12]
+                        // offset[4:3] = inst[6:5]
+                        // offset[8:6] = inst[4:2]
+                        let off_5 = (inst >> 12) & 1;
+                        let off_4_3 = (inst >> 5) & 0x3;
+                        let off_8_6 = (inst >> 2) & 0x7;
+                        let offset = (off_8_6 << 6) | (off_5 << 5) | (off_4_3 << 3);
+                        let addr = self.read_reg(2).wrapping_add(offset as u64);
+
+                        let val = self.bus.load(addr, 8).map_err(|e| format!("C.LDSP load fault: {}", e))?;
+                        self.write_reg(rd, val);
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x4 => { // C.JR, C.MV, C.EBREAK, C.JALR, C.ADD
+                         let bit12 = (inst >> 12) & 1;
+                         let rs1_rd = ((inst >> 7) & 0x1f) as usize; // bits 11-7
+                         let rs2 = ((inst >> 2) & 0x1f) as usize;    // bits 6-2
+
+                         if bit12 == 0 {
+                             if rs2 == 0 {
+                                 // C.JR
+                                 if rs1_rd == 0 {
+                                     return Err(format!("Reserved instruction C.JR with rs1=0: {:#x}", inst));
+                                 }
+                                 let target = self.read_reg(rs1_rd);
+                                 self.pc = target;
+                                 // Don't increment PC by 2, we jumped.
+                             } else {
+                                 // C.MV
+                                 if rs1_rd != 0 {
+                                     let val = self.read_reg(rs2);
+                                     self.write_reg(rs1_rd, val);
+                                 }
+                                 self.pc = self.pc.wrapping_add(2);
+                             }
+                         } else {
+                             if rs2 == 0 {
+                                 // C.EBREAK or C.JALR
+                                 if rs1_rd == 0 {
+                                     // C.EBREAK
+                                     return Err(format!("C.EBREAK encountered: {:#x}", inst));
+                                 } else {
+                                     // C.JALR
+                                     let target = self.read_reg(rs1_rd);
+                                     self.write_reg(1, self.pc.wrapping_add(2)); // link to next instruction
+                                     self.pc = target;
+                                 }
+                             } else {
+                                 // C.ADD
+                                 if rs1_rd != 0 {
+                                     let val = self.read_reg(rs1_rd).wrapping_add(self.read_reg(rs2));
+                                     self.write_reg(rs1_rd, val);
+                                 }
+                                 self.pc = self.pc.wrapping_add(2);
+                             }
+                         }
+                    }
+                    0x6 => { // C.SWSP
+                        // offset[5:2] = inst[12:9]
+                        // offset[7:6] = inst[8:7]
+                        // rd is actually rs2 bits 6:2
+                        let rs2 = ((inst >> 2) & 0x1f) as usize;
+                        let off_5_2 = (inst >> 9) & 0xf;
+                        let off_7_6 = (inst >> 7) & 0x3;
+                        let offset = (off_7_6 << 6) | (off_5_2 << 2);
+                        
+                        let addr = self.read_reg(2).wrapping_add(offset as u64);
+                        let val = self.read_reg(rs2);
+                        self.bus.store(addr, 4, val).map_err(|e| format!("C.SWSP store fault: {}", e))?;
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                    0x7 => { // C.SDSP
+                        // offset[5:3] = inst[12:10]
+                        // offset[8:6] = inst[9:7]
+                        // rs2 is bits 6:2
+                        let rs2 = ((inst >> 2) & 0x1f) as usize;
+                        let off_5_3 = (inst >> 10) & 0x7;
+                        let off_8_6 = (inst >> 7) & 0x7;
+                        let offset = (off_8_6 << 6) | (off_5_3 << 3);
+                        
+                        let addr = self.read_reg(2).wrapping_add(offset as u64);
+                        let val = self.read_reg(rs2);
+                        self.bus.store(addr, 8, val).map_err(|e| format!("C.SDSP store fault: {}", e))?;
+                        self.pc = self.pc.wrapping_add(2);
+                    }
+                     _ => {
+                        // Unknown / unimplemented compressed instruction in quadrant 2 – treat as NOP
+                        self.pc = self.pc.wrapping_add(2);
+                     }
+                }
+            }
+             _ => {
+                // Unknown compressed instruction – treat as NOP
+                self.pc = self.pc.wrapping_add(2);
+             }
+        }
+        Ok(())
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        let inst = self.fetch()?;
+        self.last_pc = self.pc;
+        self.last_inst = inst;
+        let res = self.execute(inst);
+        if res.is_ok() {
+            // Increment cycle CSR (0xC00) as a simple cycle counter per executed instruction
+            let idx = 0xC00 & 0xFFF;
+            self.csrs[idx] = self.csrs[idx].wrapping_add(1);
+        }
+        res
+    }
+
+    fn read_reg(&self, reg: usize) -> u64 {
+        if reg == 0 { 0 } else { self.regs[reg] }
+    }
+
+    fn write_reg(&mut self, reg: usize, val: u64) {
+        if reg != 0 {
+            self.regs[reg] = val;
+        }
+    }
+
+    fn read_csr(&self, addr: usize) -> u64 {
+        self.csrs[addr & 0xfff]
+    }
+
+    fn write_csr(&mut self, addr: usize, val: u64) {
+        self.csrs[addr & 0xfff] = val;
+    }
+
+    fn decode_branch_offset(inst: u32) -> i64 {
+        let imm12 = ((inst >> 31) & 0x1) as i64;
+        let imm11 = ((inst >> 7) & 0x1) as i64;
+        let imm10_5 = ((inst >> 25) & 0x3f) as i64;
+        let imm4_1 = ((inst >> 8) & 0xf) as i64;
+
+        let mut offset = (imm12 << 12) | (imm11 << 11) | (imm10_5 << 5) | (imm4_1 << 1);
+        // Sign-extend the 13-bit immediate to 64 bits
+        offset = (offset << 51) >> 51;
+        offset
+    }
+
+    pub fn dump_regs(&self) {
+        println!("PC: {:#x}", self.pc);
+        for i in 0..32 {
+            println!("x{}: {:#x}", i, self.regs[i]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::{Bus, DRAM_BASE};
+
+    #[test]
+    fn test_add_instructions() {
+        let mut bus = Bus::new();
+
+        // Instructions:
+        // addi x1, x0, 1  -> 00100093 (opcode 0x13, rd=1, rs1=0, imm=1, funct3=0)
+        // addi x2, x0, 1  -> 00100113 (opcode 0x13, rd=2, rs1=0, imm=1, funct3=0)
+        // add x3, x1, x2  -> 002081b3 (opcode 0x33, rd=3, rs1=1, rs2=2, funct3=0, funct7=0)
+
+        // Little endian encoding:
+        // 00100093 -> 93 00 10 00
+        // 00100113 -> 13 01 10 00
+        // 002081b3 -> b3 81 20 00
+
+        let code = vec![
+            0x93, 0x00, 0x10, 0x00, 0x13, 0x01, 0x10, 0x00, 0xb3, 0x81, 0x20, 0x00,
+        ];
+
+        bus.initialize_dram(&code)
+            .expect("Failed to initialize DRAM");
+
+        let mut cpu = Cpu::new(bus);
+
+        // Run 3 steps
+        cpu.step().expect("Step 1 failed"); // addi x1, x0, 1
+        cpu.step().expect("Step 2 failed"); // addi x2, x0, 1
+        cpu.step().expect("Step 3 failed"); // add x3, x1, x2
+
+        assert_eq!(cpu.read_reg(1), 1);
+        assert_eq!(cpu.read_reg(2), 1);
+        assert_eq!(cpu.read_reg(3), 2);
+    }
+
+    #[test]
+    fn test_memory_and_jumps() {
+        let mut bus = Bus::new();
+
+        // 0: LUI x2, 0x80000     -> x2 = 0xffffffff80000000
+        //    0x80000137 -> 37 01 00 80
+
+        // 4: SLLI x2, x2, 32     -> x2 = 0x8000000000000000
+        //    0x02011113 -> 13 11 01 02
+
+        // 8: SRLI x2, x2, 32     -> x2 = 0x0000000080000000
+        //    0x02015113 -> 13 51 01 02
+
+        // 12: ADDI x1, x0, 42    -> x1 = 42
+        //    0x02a00093 -> 93 00 a0 02
+
+        // 16: SW x1, 0(x2)       -> mem[0x80000000] = 42
+        //    0x00112023 -> 23 20 11 00
+
+        // 20: LW x3, 0(x2)       -> x3 = 42
+        //     0x00012183 -> 83 21 01 00
+
+        // 24: JAL x0, 8          -> pc += 8. Skip next instruction.
+        //     0x0080006f -> 6f 00 80 00
+
+        // 28: ADDI x3, x3, 1     (Should be skipped)
+        //     0x00118193 -> 93 81 11 00
+
+        // 32: ADDI x3, x3, 2     (Target)
+        //     0x00218193 -> 93 81 21 00
+
+        let code = vec![
+            0x37, 0x01, 0x00, 0x80, 0x13, 0x11, 0x01, 0x02, 0x13, 0x51, 0x01, 0x02, 0x93, 0x00,
+            0xa0, 0x02, 0x23, 0x20, 0x11, 0x00, 0x83, 0x21, 0x01, 0x00, 0x6f, 0x00, 0x80, 0x00,
+            0x93, 0x81, 0x11, 0x00, 0x93, 0x81, 0x21, 0x00,
+        ];
+
+        bus.initialize_dram(&code)
+            .expect("Failed to initialize DRAM");
+        let mut cpu = Cpu::new(bus);
+
+        // Execute steps
+        cpu.step().expect("Step 1 (LUI) failed");
+        assert_eq!(cpu.read_reg(2), 0xffffffff80000000);
+
+        cpu.step().expect("Step 2 (SLLI) failed");
+        assert_eq!(cpu.read_reg(2), 0x8000000000000000);
+
+        cpu.step().expect("Step 3 (SRLI) failed");
+        assert_eq!(cpu.read_reg(2), 0x80000000);
+
+        cpu.step().expect("Step 4 (ADDI) failed");
+        assert_eq!(cpu.read_reg(1), 42);
+
+        cpu.step().expect("Step 5 (SW) failed");
+
+        cpu.step().expect("Step 6 (LW) failed");
+        assert_eq!(cpu.read_reg(3), 42);
+
+        cpu.step().expect("Step 7 (JAL) failed");
+        // PC should be 24 + 8 = 32. (0x80000020)
+        assert_eq!(cpu.pc, DRAM_BASE + 32);
+
+        cpu.step().expect("Step 8 (ADDI target) failed");
+        // x3 was 42. +2 = 44.
+        assert_eq!(cpu.read_reg(3), 44);
+    }
+
+    #[test]
+    fn test_branch_instructions() {
+        fn encode_branch(funct3: u32, rs1: u32, rs2: u32, imm: i32) -> u32 {
+            assert_eq!(imm % 2, 0, "Branch immediate must be 2-byte aligned");
+            assert!(
+                (-4096..=4094).contains(&imm),
+                "Immediate out of 13-bit branch range"
+            );
+            let imm_u = (imm as u32) & 0x1fff;
+            let imm12 = ((imm_u >> 12) & 0x1) << 31;
+            let imm10_5 = ((imm_u >> 5) & 0x3f) << 25;
+            let imm4_1 = ((imm_u >> 1) & 0xf) << 8;
+            let imm11 = ((imm_u >> 11) & 0x1) << 7;
+
+            imm12 | imm10_5 | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | imm4_1 | imm11 | 0x63
+        }
+
+        let bus = Bus::new();
+        let mut cpu = Cpu::new(bus);
+
+        // BEQ: taken
+        cpu.pc = DRAM_BASE;
+        cpu.regs[1] = 5;
+        cpu.regs[2] = 5;
+        let beq = encode_branch(0x0, 1, 2, 8);
+        cpu.execute(beq).expect("BEQ failed");
+        assert_eq!(cpu.pc, DRAM_BASE + 8);
+
+        // BNE: taken with negative offset
+        cpu.pc = DRAM_BASE + 16;
+        cpu.regs[1] = 1;
+        cpu.regs[2] = 2;
+        let bne = encode_branch(0x1, 1, 2, -8);
+        cpu.execute(bne).expect("BNE failed");
+        assert_eq!(cpu.pc, DRAM_BASE + 8);
+
+        // BLT: signed comparison
+        cpu.pc = DRAM_BASE;
+        cpu.regs[3] = (-1i64) as u64;
+        cpu.regs[4] = 1;
+        let blt = encode_branch(0x4, 3, 4, 12);
+        cpu.execute(blt).expect("BLT failed");
+        assert_eq!(cpu.pc, DRAM_BASE + 12);
+
+        // BGE: not taken (signed)
+        cpu.pc = DRAM_BASE;
+        cpu.regs[5] = (-1i64) as u64;
+        cpu.regs[6] = 10;
+        let bge = encode_branch(0x5, 5, 6, 12);
+        cpu.execute(bge).expect("BGE failed");
+        assert_eq!(cpu.pc, DRAM_BASE + 4);
+
+        // BLTU: unsigned comparison taken
+        cpu.pc = DRAM_BASE;
+        cpu.regs[7] = 1;
+        cpu.regs[8] = 2;
+        let bltu = encode_branch(0x6, 7, 8, 10);
+        cpu.execute(bltu).expect("BLTU failed");
+        assert_eq!(cpu.pc, DRAM_BASE + 10);
+
+        // BGEU: unsigned comparison taken
+        cpu.pc = DRAM_BASE;
+        cpu.regs[9] = 10;
+        cpu.regs[10] = 1;
+        let bgeu = encode_branch(0x7, 9, 10, 14);
+        cpu.execute(bgeu).expect("BGEU failed");
+        assert_eq!(cpu.pc, DRAM_BASE + 14);
+    }
+}
+</file>
+
+<file path="vm/src/dram.rs">
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MemoryError {
+    #[error("Address out of bounds: {0:#x}")]
+    OutOfBounds(u64),
+    #[error("Invalid alignment for address: {0:#x}")]
+    InvalidAlignment(u64),
+}
+
+pub struct Dram {
+    data: Vec<u8>,
+}
+
+impl Dram {
+    pub fn new(size: usize) -> Self {
+        Self {
+            data: vec![0; size],
+        }
+    }
+
+    pub fn load(&self, addr: u64, size: u64) -> Result<u64, MemoryError> {
+        let addr = addr as usize;
+        let size = size as usize;
+
+        if addr + size > self.data.len() {
+            return Err(MemoryError::OutOfBounds(addr as u64));
+        }
+
+        let mut value = 0u64;
+        for i in 0..size {
+            value |= (self.data[addr + i] as u64) << (i * 8);
+        }
+
+        Ok(value)
+    }
+
+    pub fn store(&mut self, addr: u64, size: u64, value: u64) -> Result<(), MemoryError> {
+        let addr = addr as usize;
+        let size = size as usize;
+
+        if addr + size > self.data.len() {
+            return Err(MemoryError::OutOfBounds(addr as u64));
+        }
+
+        for i in 0..size {
+            self.data[addr + i] = ((value >> (i * 8)) & 0xFF) as u8;
+        }
+
+        Ok(())
+    }
+
+    pub fn load_8(&self, addr: u64) -> Result<u64, MemoryError> {
+        self.load(addr, 1)
+    }
+
+    pub fn load_16(&self, addr: u64) -> Result<u64, MemoryError> {
+        self.load(addr, 2)
+    }
+
+    pub fn load_32(&self, addr: u64) -> Result<u64, MemoryError> {
+        self.load(addr, 4)
+    }
+
+    pub fn load_64(&self, addr: u64) -> Result<u64, MemoryError> {
+        self.load(addr, 8)
+    }
+
+    pub fn store_8(&mut self, addr: u64, value: u64) -> Result<(), MemoryError> {
+        self.store(addr, 1, value)
+    }
+
+    pub fn store_16(&mut self, addr: u64, value: u64) -> Result<(), MemoryError> {
+        self.store(addr, 2, value)
+    }
+
+    pub fn store_32(&mut self, addr: u64, value: u64) -> Result<(), MemoryError> {
+        self.store(addr, 4, value)
+    }
+
+    pub fn store_64(&mut self, addr: u64, value: u64) -> Result<(), MemoryError> {
+        self.store(addr, 8, value)
+    }
+
+    pub fn write_bytes(&mut self, addr: u64, data: &[u8]) -> Result<(), MemoryError> {
+        let addr = addr as usize;
+        let end = addr
+            .checked_add(data.len())
+            .ok_or(MemoryError::OutOfBounds(addr as u64))?;
+
+        if end > self.data.len() {
+            return Err(MemoryError::OutOfBounds(addr as u64));
+        }
+
+        self.data[addr..end].copy_from_slice(data);
+        Ok(())
+    }
+
+    pub fn fill(&mut self, addr: u64, len: usize, value: u8) -> Result<(), MemoryError> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let addr = addr as usize;
+        let end = addr
+            .checked_add(len)
+            .ok_or(MemoryError::OutOfBounds(addr as u64))?;
+
+        if end > self.data.len() {
+            return Err(MemoryError::OutOfBounds(addr as u64));
+        }
+
+        self.data[addr..end].fill(value);
+        Ok(())
+    }
+}
+</file>
+
+<file path="vm/src/lib.rs">
+pub mod bus;
+pub mod cpu;
+pub mod dram;
+pub mod loader;
+pub mod uart;
+
+use crate::bus::Bus;
+use crate::bus::DRAM_SIZE;
+use crate::cpu::Cpu;
+use crate::loader::load_image;
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct WasmVm {
+    cpu: Cpu,
+}
+
+#[wasm_bindgen]
+impl WasmVm {
+    #[wasm_bindgen(constructor)]
+    pub fn new(binary: &[u8]) -> Result<WasmVm, String> {
+        console_error_panic_hook::set_once();
+        let mut bus = Bus::new();
+        load_image(&mut bus, binary).map_err(|e| e.to_string())?;
+        let cpu = Cpu::new(bus);
+        Ok(WasmVm { cpu })
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        self.cpu.step()
+    }
+
+    pub fn run(&mut self, cycles: usize) -> Result<usize, String> {
+        for i in 0..cycles {
+            match self.cpu.step() {
+                Ok(_) => {},
+                Err(e) => return Err(format!("CPU error at step {}: {}", i, e)),
+            }
+            // Optional: Break on WFI or similar if we had interrupts implemented
+        }
+        Ok(cycles)
+    }
+
+    pub fn input(&mut self, byte: u8) {
+        self.cpu.bus.uart.push_input(byte);
+    }
+
+    pub fn get_output(&mut self) -> Option<u8> {
+        self.cpu.bus.uart.pop_output()
+    }
+    
+    pub fn get_pc(&self) -> u64 {
+        self.cpu.pc
+    }
+    
+    pub fn get_reg(&self, reg: usize) -> u64 {
+        if reg < 32 {
+            self.cpu.regs[reg]
+        } else {
+            0
+        }
+    }
+
+    pub fn get_memory_usage(&self) -> u64 {
+        self.cpu.bus.used_memory
+    }
+
+    pub fn get_total_memory(&self) -> u64 {
+        DRAM_SIZE
+    }
+
+    pub fn get_cpu_cycles(&self) -> u64 {
+        self.cpu.csrs[0xC00]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bus::Bus;
+
+    #[test]
+    fn test_bus_load_store() {
+        let mut bus = Bus::new();
+
+        // Test loading a dummy binary
+        let dummy_binary = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        bus.initialize_dram(&dummy_binary)
+            .expect("Failed to initialize DRAM");
+
+        // Read back from 0x8000_0000 (DRAM base)
+        let val = bus.load(0x8000_0000, 1).expect("Failed to load byte");
+        assert_eq!(val, 0xAA);
+
+        let val = bus.load(0x8000_0001, 1).expect("Failed to load byte");
+        assert_eq!(val, 0xBB);
+
+        // Test 32-bit load
+        let val = bus.load(0x8000_0000, 4).expect("Failed to load word");
+        // Little endian: 0xDDCCBBAA
+        assert_eq!(val, 0xDDCCBBAA);
+    }
+}
+</file>
+
+<file path="vm/src/loader.rs">
+use crate::bus::{Bus, DRAM_BASE};
+use elf::{abi::PT_LOAD, endian::LittleEndian, segment::ProgramHeader, ElfBytes};
+
+pub fn load_image(bus: &mut Bus, image: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    if image.starts_with(b"\x7fELF") {
+        load_elf_segments(bus, image)?;
+    } else {
+        bus.write_bytes(DRAM_BASE, image)?;
+    }
+
+    Ok(())
+}
+
+fn load_elf_segments(bus: &mut Bus, image: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let elf = ElfBytes::<LittleEndian>::minimal_parse(image)?;
+    let segments = elf
+        .segments()
+        .ok_or_else(|| "ELF file is missing program headers")?;
+
+    for phdr in segments.iter() {
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
+
+        let (start, end) = segment_file_range(&phdr)?;
+        let segment = &image[start..end];
+        let load_addr = if phdr.p_paddr != 0 {
+            phdr.p_paddr
+        } else {
+            phdr.p_vaddr
+        };
+
+        if !segment.is_empty() {
+            bus.write_bytes(load_addr, segment)?;
+        }
+
+        if phdr.p_memsz > phdr.p_filesz {
+            let zero_len = (phdr.p_memsz - phdr.p_filesz) as usize;
+            let zero_base = load_addr + phdr.p_filesz;
+            bus.fill_bytes(zero_base, zero_len, 0)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn segment_file_range(
+    phdr: &ProgramHeader,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let start = usize::try_from(phdr.p_offset)?;
+    let size = usize::try_from(phdr.p_filesz)?;
+    let end = start
+        .checked_add(size)
+        .ok_or("ELF segment range overflow")?;
+    Ok((start, end))
+}
+</file>
+
+<file path="vm/src/main.rs">
+use std::env;
+use std::fs;
+use std::io::{self, Read, Write};
+use std::process;
+use std::sync::mpsc;
+use std::thread;
+use vm::bus::Bus;
+use vm::cpu::Cpu;
+use vm::loader::load_image;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let kernel_path = match env::args().nth(1) {
+        Some(arg) => arg,
+        None => {
+            eprintln!("Usage: vm <path-to-kernel>");
+            process::exit(1);
+        }
+    };
+
+    let image = fs::read(&kernel_path)?;
+    let mut bus = Bus::new();
+    load_image(&mut bus, &image)?;
+
+    let mut cpu = Cpu::new(bus);
+    let mut stdout = io::stdout();
+
+    // Stdin handling
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let mut buf = [0u8; 1];
+        while stdin.read_exact(&mut buf).is_ok() {
+            let _ = tx.send(buf[0]);
+        }
+    });
+
+    loop {
+        // Check for input
+        if let Ok(byte) = rx.try_recv() {
+            cpu.bus.uart.push_input(byte);
+        }
+
+        if let Err(err) = cpu.step() {
+            eprintln!("CPU halted: {err}");
+            cpu.dump_regs();
+            eprintln!(
+                "Last executed instruction at {:#x}: {:#x}",
+                cpu.last_pc, cpu.last_inst
+            );
+            if let Ok(word) = cpu.bus.load(cpu.pc, 4) {
+                eprintln!("Offending instruction word at {:#x}: {:#x}", cpu.pc, word as u32);
+            }
+            break;
+        }
+
+        // Drain any UART output and mirror it to the host stdout.
+        while let Some(byte) = cpu.bus.uart.pop_output() {
+            let _ = stdout.write_all(&[byte]);
+            let _ = stdout.flush();
+        }
+    }
+
+    Ok(())
+}
+</file>
+
+<file path="vm/src/uart.rs">
+use crate::dram::MemoryError;
+use std::collections::VecDeque;
+
+pub struct Uart {
+    pub input: VecDeque<u8>,
+    pub output: VecDeque<u8>,
+}
+
+impl Uart {
+    pub fn new() -> Self {
+        Self {
+            input: VecDeque::new(),
+            output: VecDeque::new(),
+        }
+    }
+
+    pub fn load(&mut self, offset: u64, size: u64) -> Result<u64, MemoryError> {
+        if size != 1 {
+            return Err(MemoryError::InvalidAlignment(offset));
+        }
+
+        // If we have input, return it. Otherwise 0.
+        // (Real 16550 UART has status registers, but we simplify)
+        if let Some(byte) = self.input.pop_front() {
+            Ok(byte as u64)
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub fn store(&mut self, offset: u64, size: u64, value: u64) -> Result<(), MemoryError> {
+        if size != 1 {
+            return Err(MemoryError::InvalidAlignment(offset));
+        }
+
+        let byte = (value & 0xff) as u8;
+        self.output.push_back(byte);
+        Ok(())
+    }
+
+    // Interface for the Host (Wasm)
+    pub fn push_input(&mut self, byte: u8) {
+        self.input.push_back(byte);
+    }
+
+    pub fn pop_output(&mut self) -> Option<u8> {
+        self.output.pop_front()
+    }
+}
+</file>
+
+<file path="vm/Cargo.toml">
+[package]
+name = "vm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+elf = "0.8.0"
+thiserror = "2.0.17"
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1.7"
+</file>
+
+<file path="web/src/app/globals.css">
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+</file>
+
+<file path="web/src/app/layout.tsx">
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "Create Next App",
+  description: "Generated by create next app",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+      >
+        {children}
+      </body>
+    </html>
+  );
+}
+</file>
+
+<file path="web/src/app/page.tsx">
+"use client";
+
+import {
+  useEffect,
+  useRef,
+} from "react";
+import { useVM } from "../hooks/useVM";
+
+export default function Home() {
+  const { output, status, sendInput, cpuLoad, memUsage } = useVM();
+  const endRef = useRef<HTMLDivElement>(null);
+
+  // Auto scroll
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [output]);
+
+  // Global key handler so you can still type anywhere on the page
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      // Don't double-handle keys when an input/textarea/contenteditable has focus
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
+          return;
+        }
+      }
+
+      if (e.key.length === 1 || e.key === "Enter" || e.key === "Backspace") {
+        e.preventDefault();
+        sendInput(e.key);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [sendInput]);
+
+  return (
+    <div className="min-h-screen bg-black text-green-500 p-4 font-mono text-lg flex flex-col">
+      <div className="mb-2 border-b border-green-700 pb-2 flex justify-between">
+        <h1 className="font-bold">RISC-V VM</h1>
+        <div className="flex gap-4 items-center">
+          <span className="text-sm text-green-400">
+            CPU: {cpuLoad.toFixed(0)}%
+          </span>
+          <span className="text-sm text-green-400">
+            MEM: {(memUsage / (1024 * 1024)).toFixed(1)} MiB
+          </span>
+          <span
+            className={status === "Running" ? "text-green-500" : "text-red-500"}
+          >
+            [{status}]
+          </span>
+        </div>
+      </div>
+
+      <div className="flex-grow whitespace-pre-wrap break-all focus:outline-none" tabIndex={0}>
+        {output}
+        <span className="animate-pulse">_</span>
+        <div ref={endRef} />
+      </div>
+      
+      <div className="mt-2 text-xs text-gray-500">
+          Type anywhere to send input to the VM.
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="web/src/hooks/useVM.ts">
+import { useEffect, useRef, useState, useCallback } from 'react';
+import init, { WasmVm } from '../pkg/vm';
+
+export function useVM() {
+  const vmRef = useRef<WasmVm | null>(null);
+  const [output, setOutput] = useState<string>("");
+  const [status, setStatus] = useState<string>("Initializing...");
+  const requestRef = useRef<number | null>(null);
+  const [cpuLoad, setCpuLoad] = useState<number>(0);
+  const [memUsage, setMemUsage] = useState<number>(0);
+
+  useEffect(() => {
+    let active = true;
+
+    async function start() {
+      try {
+        // Let the bundler resolve the correct wasm asset path.
+        await init('/vm_bg.wasm');
+        
+        if (!active) return;
+
+        const res = await fetch('/kernel.bin');
+        if (!res.ok) throw new Error(`Failed to load kernel: ${res.statusText}`);
+        const buf = await res.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        
+        const vm = new WasmVm(bytes);
+        vmRef.current = vm;
+        setStatus("Running");
+        
+        loop();
+      } catch (err: any) {
+        if (active) setStatus(`Error: ${err.message || err}`);
+      }
+    }
+    start();
+    
+    return () => {
+      active = false;
+      if (requestRef.current !== null) cancelAnimationFrame(requestRef.current);
+    };
+  }, []);
+
+  const loop = () => {
+    const vm = vmRef.current;
+    if (!vm) return;
+
+    const INSTRUCTIONS_PER_FRAME = 5000; 
+    
+    try {
+      const t0 = performance.now();
+      for (let i = 0; i < INSTRUCTIONS_PER_FRAME; i++) {
+        vm.step();
+      }
+      const t1 = performance.now();
+      const duration = t1 - t0;
+      const load = Math.min(100, (duration / 16.67) * 100);
+      setCpuLoad(load);
+      
+      // Query memory usage if the wasm exposes it
+      const anyVm = vm as any;
+      if (typeof anyVm.get_memory_usage === 'function') {
+        const usage = Number(anyVm.get_memory_usage());
+        setMemUsage(usage);
+      }
+      
+      // Drain output buffer (sanitize control chars)
+      const codes: number[] = [];
+      let ch = (vm as any).get_output?.();
+      let limit = 2000;
+      while (ch !== undefined && limit > 0) {
+        codes.push(Number(ch));
+        ch = (vm as any).get_output?.();
+        limit--;
+      }
+
+      if (codes.length) {
+        setOutput(prev => {
+          let current = prev;
+          for (const code of codes) {
+            if (code === 8) {
+              // Backspace
+              current = current.slice(0, -1);
+            } else if (code === 10 || code === 13 || (code >= 32 && code <= 126)) {
+              current += String.fromCharCode(code);
+            } else {
+              // Drop other control bytes
+            }
+          }
+          return current;
+        });
+      }
+      
+      requestRef.current = requestAnimationFrame(loop);
+    } catch (e: any) {
+      setStatus(`Crashed: ${e}`);
+      console.error(e);
+    }
+  };
+
+  const sendInput = useCallback((key: string) => {
+    const vm = vmRef.current;
+    if (!vm) return;
+    
+    // Map Enter to \n
+    if (key === 'Enter') {
+        vm.input(10); // \n
+        return;
+    }
+
+    // Map Backspace to 8
+    if (key === 'Backspace') {
+        vm.input(8);
+        return;
+    }
+    
+    if (key.length === 1) {
+        vm.input(key.charCodeAt(0));
+    }
+  }, []);
+
+  return { output, status, sendInput, cpuLoad, memUsage };
+}
+</file>
+
+</files>

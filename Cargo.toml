@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "vm",
+    "kernel",
+]
+resolver = "2"
+
