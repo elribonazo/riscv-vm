@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_report_step = 0u64;
     
     // Initialize console for host input
-    let mut console = Console::new();
+    let console = Console::new();
     let mut escaped = false;
 
     loop {
@@ -182,12 +182,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Check UART output
-        while let Some(byte) = bus.uart.pop_output() {
-            print!("{}", byte as char);
-        }
+        // Check UART output - handle raw mode by converting \n to \r\n
         use std::io::Write;
-        let _ = std::io::stdout().flush();
+        let stdout = std::io::stdout();
+        let mut stdout_lock = stdout.lock();
+        while let Some(byte) = bus.uart.pop_output() {
+            // In raw terminal mode, \n alone doesn't return cursor to column 0.
+            // We need to emit \r\n for proper line breaks.
+            if byte == b'\n' {
+                let _ = stdout_lock.write_all(b"\r\n");
+            } else if byte == b'\r' {
+                // Carriage return - just emit it
+                let _ = stdout_lock.write_all(b"\r");
+            } else {
+                let _ = stdout_lock.write_all(&[byte]);
+            }
+        }
+        let _ = stdout_lock.flush();
 
         // Stop if PC is 0 in Machine/Supervisor mode (likely trap to unmapped vector).
         // User mode PC=0 is valid (xv6 initcode).

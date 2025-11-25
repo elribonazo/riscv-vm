@@ -16,29 +16,15 @@ impl Console {
         let running = Arc::new(AtomicBool::new(true));
         let r_clone = running.clone();
 
-        // Setup raw mode for INPUT only, keeping output processing intact.
-        // cfmakeraw() disables OPOST which breaks newline handling.
+        // Setup raw mode
         let mut original_termios = None;
         if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
-            let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+            let mut termios = unsafe { std::mem::zeroed() };
             if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut termios) } == 0 {
                 original_termios = Some(termios);
                 let mut raw = termios;
                 unsafe {
-                    // Input flags: disable break processing, CR-to-NL, parity, strip, flow control
-                    raw.c_iflag &= !(libc::BRKINT | libc::ICRNL | libc::INPCK | libc::ISTRIP | libc::IXON);
-                    // Local flags: disable echo, canonical mode, signals, extended input
-                    raw.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG | libc::IEXTEN);
-                    // Control flags: set 8-bit chars
-                    raw.c_cflag |= libc::CS8;
-                    // Output flags: KEEP OPOST for proper newline handling!
-                    // (We do NOT clear OPOST like cfmakeraw does)
-                    // raw.c_oflag &= !(libc::OPOST);  // DON'T do this!
-                    
-                    // Set read to return immediately with whatever is available
-                    raw.c_cc[libc::VMIN] = 0;
-                    raw.c_cc[libc::VTIME] = 0;
-                    
+                    libc::cfmakeraw(&mut raw);
                     libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
                 }
             }
