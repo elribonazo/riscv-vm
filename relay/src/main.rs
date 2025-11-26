@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{accept_async, tungstenite::{Error as WsError, Message}};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "WebSocket relay server with gateway for RISC-V VM networking")]
@@ -1042,7 +1042,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stream, peer_addr, client_id, clients, config, 
                 icmp_socket, icmp_tracker, udp_socket, udp_tracker
             ).await {
-                error!("Connection error for client {}: {}", client_id, e);
+                // Filter out harmless errors from health checks/scanners (like "No Upgrade header")
+                let is_common_protocol_error = if let Some(ws_err) = e.downcast_ref::<WsError>() {
+                    match ws_err {
+                        WsError::Protocol(ref proto_err) => {
+                            let msg = proto_err.to_string();
+                            msg.contains("No \"Upgrade: websocket\" header") || 
+                            msg.contains("Connection header is missing")
+                        },
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+
+                if is_common_protocol_error {
+                    debug!("Ignored non-websocket connection from client {}: {}", client_id, e);
+                } else {
+                    error!("Connection error for client {}: {}", client_id, e);
+                }
             }
         });
     }
