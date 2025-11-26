@@ -29,6 +29,11 @@ RUN git clone https://github.com/elribonazo/riscv-vm.git .
 # Build kernel and VM (WASM)
 RUN chmod +x build.sh && ./build.sh
 
+WORKDIR /app/web
+
+# Enable corepack for Yarn 4
+RUN corepack enable
+
 # Install dependencies and build
 RUN yarn install --immutable
 RUN yarn build
@@ -39,5 +44,5 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-CMD ["yarn start"]
+CMD ["yarn", "start"]
 
