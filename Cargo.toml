@@ -1,5 +1,5 @@
 [workspace]
-members = ["vm"]
+members = ["vm", "kernel"]
 resolver = "2"
 
 
