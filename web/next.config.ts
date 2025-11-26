@@ -1,29 +1,17 @@
 import type { NextConfig } from "next";
 
-const isProd = process.env.NODE_ENV === "production";
-const repoName = process.env.GITHUB_REPOSITORY?.split("/")[1] || "risk-v";
-
 const nextConfig: NextConfig = {
-  // Enable static export for GitHub Pages
-  output: "export",
+  // Enable standalone output for Docker
+  output: "standalone",
 
   env: {
     NEXT_PUBLIC_RELAY_URL: process.env.NEXT_PUBLIC_RELAY_URL,
   },
   
-  // Set base path for GitHub Pages (repo name)
-  basePath: isProd ? `/${repoName}` : "",
-  
-  // Asset prefix for static assets
-  assetPrefix: isProd ? `/${repoName}/` : "",
-  
-  // Disable image optimization (not supported in static export)
+  // Disable image optimization if needed, or keep it enabled for standalone
   images: {
     unoptimized: true,
   },
-  
-  // Ensure trailing slashes for static hosting
-  trailingSlash: true,
 };
 
 export default nextConfig;
