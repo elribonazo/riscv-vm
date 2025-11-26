@@ -1,3 +1,7 @@
+//! Console handling for terminal I/O (not available in WASM).
+
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::io::{self, Read};
 use std::sync::mpsc;
 use std::thread;
