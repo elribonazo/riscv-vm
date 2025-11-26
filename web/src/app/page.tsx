@@ -232,7 +232,7 @@ export default function Home() {
                 <div className="screen-boot-state">
                   <div className="boot-animation">
                     <div className="boot-spinner" />
-                    <span>Booting {selectedKernel === "custom_kernel" ? "Custom Kernel" : "xv6"}...</span>
+                    <span>Booting {selectedKernel === "custom" ? "Custom Kernel" : "xv6"}...</span>
                   </div>
                 </div>
               )}
@@ -345,7 +345,7 @@ export default function Home() {
           <span className="sep">•</span>
           <span>128 MiB</span>
           <span className="sep">•</span>
-          <span>{currentKernel === "kernel" ? "xv6" : currentKernel === "custom_kernel" ? "Custom" : "Ready"}</span>
+          <span>{currentKernel === "kernel" ? "xv6" : currentKernel === "custom" ? "Custom" : "Ready"}</span>
           {networkStatus === 'connected' && (
             <>
               <span className="sep">•</span>
