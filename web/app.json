@@ -1,8 +1,0 @@
-{
-    "schemaVersion": 2,
-    "dockerfilePath": "./Dockerfile",
-    "args": {
-      "NODE_ENV": "production"
-    }
-  }
-  

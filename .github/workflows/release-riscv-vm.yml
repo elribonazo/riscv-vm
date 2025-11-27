@@ -1,0 +1,61 @@
+name: Release RISC-V VM
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Next Version (e.g. v1.0.0). Check Releases for last version.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-riscv-vm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: riscv64gc-unknown-none-elf
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install dependencies
+        run: cd riscv-vm && yarn install
+
+      - name: Update version
+        run: |
+          cd riscv-vm
+          npm version ${{ inputs.version }} --no-git-tag-version
+
+      - name: Run build script
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Publish to npm
+        run: |
+          cd riscv-vm
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: riscv-vm-${{ inputs.version }}
+          name: RISC-V VM ${{ inputs.version }}
+          files: target/release/riscv-vm
+          generate_release_notes: true
+

@@ -1,0 +1,48 @@
+name: Release Kernel
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Next Version (e.g. v1.0.0). Check Releases for last version.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: riscv64gc-unknown-none-elf
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install dependencies
+        run: cd riscv-vm && yarn install
+
+      - name: Run build script
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: kernel-${{ inputs.version }}
+          name: Kernel ${{ inputs.version }}
+          files: target/riscv64gc-unknown-none-elf/release/kernel
+          generate_release_notes: true
+

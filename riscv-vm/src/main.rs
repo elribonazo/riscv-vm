@@ -13,9 +13,9 @@ use riscv_vm::console::Console;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to binary to load
+    /// Path or URL to binary to load
     #[arg(short, long)]
-    kernel: PathBuf,
+    kernel: String,
 
     /// Address to load kernel at (default 0x8000_0000)
     #[arg(long, default_value_t = 0x8000_0000)]
@@ -74,9 +74,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args = Args::parse();
 
-    let mut file = File::open(&args.kernel)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
+    let buffer = if args.kernel.starts_with("http://") || args.kernel.starts_with("https://") {
+        println!("Downloading kernel from {}...", args.kernel);
+        let response = reqwest::blocking::get(&args.kernel)?;
+        if !response.status().is_success() {
+            return Err(format!("Failed to download kernel: {}", response.status()).into());
+        }
+        response.bytes()?.to_vec()
+    } else {
+        let mut file = File::open(&args.kernel)?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+        buffer
+    };
 
     let dram_size_bytes = args
         .mem_mib
