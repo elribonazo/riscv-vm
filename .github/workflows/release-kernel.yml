@@ -22,21 +22,8 @@ jobs:
           toolchain: stable
           targets: riscv64gc-unknown-none-elf
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-      - name: Install dependencies
-        run: cd riscv-vm && yarn install
-
       - name: Run build script
-        run: |
-          chmod +x build.sh
-          ./build.sh
+        run: cargo build -p kernel --target riscv64gc-unknown-none-elf --release
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

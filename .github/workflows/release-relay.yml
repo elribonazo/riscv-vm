@@ -11,38 +11,68 @@ permissions:
   contents: write
 
 jobs:
-  release-relay:
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: relay
+            asset_name: relay-linux-amd64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: relay
+            asset_name: relay-darwin-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: relay
+            asset_name: relay-darwin-arm64
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: riscv64gc-unknown-none-elf
+          targets: ${{ matrix.target }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Build
+        run: cargo build -p relay --release --target ${{ matrix.target }}
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-      - name: Install dependencies
-        run: cd riscv-vm && yarn install
-
-      - name: Run build script
+      - name: Rename binary
+        shell: bash
         run: |
-          chmod +x build.sh
-          ./build.sh
+          cd target/${{ matrix.target }}/release
+          mv ${{ matrix.binary_name }} ../../../${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: relay-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -R artifacts
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: relay-${{ inputs.version }}
           name: Relay ${{ inputs.version }}
-          files: target/release/relay
+          files: artifacts/*
           generate_release_notes: true
 
