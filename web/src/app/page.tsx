@@ -10,7 +10,8 @@ const Computer3D = ({
   powerLed, 
   actLed, 
   netLed,
-  onPowerClick 
+  onPowerClick,
+  inlineControls
 }: { 
   children: React.ReactNode;
   isOn: boolean;
@@ -18,6 +19,7 @@ const Computer3D = ({
   actLed: string;
   netLed: string;
   onPowerClick: () => void;
+  inlineControls?: React.ReactNode;
 }) => {
   return (
     <div className="computer-3d-container">
@@ -39,13 +41,19 @@ const Computer3D = ({
             </div>
           </div>
           
-          {/* Bottom bezel with LEDs and brand */}
+          {/* Bottom bezel with LEDs, inline controls, and power */}
           <div className="monitor-bottom-strip">
             <div className="led-cluster">
               <div className={`led-3d ${powerLed}`} title="Power" />
               <div className={`led-3d ${actLed}`} title="Activity" />
               <div className={`led-3d ${netLed}`} title="Network" />
             </div>
+            {/* Inline controls */}
+            {inlineControls && (
+              <div className="inline-controls">
+                {inlineControls}
+              </div>
+            )}
             <span className="brand-emboss">RISK-V</span>
             <button 
               onClick={onPowerClick}
@@ -72,33 +80,48 @@ const Computer3D = ({
   );
 };
 
-// Minimal network indicator
-const NetworkBadge = ({ status, enabled, onClick }: { 
-  status: NetworkStatus; 
-  enabled: boolean;
-  onClick: () => void;
+// Retro toggle switch for kernel selection
+const KernelSwitch = ({ 
+  value, 
+  onChange, 
+  disabled 
+}: { 
+  value: KernelType;
+  onChange: (v: KernelType) => void;
+  disabled: boolean;
 }) => {
-  const getStatusInfo = () => {
-    if (status === 'connected') return { color: '#22c55e', label: 'Connected' };
-    if (status === 'connecting') return { color: '#eab308', label: 'Connecting...' };
-    if (status === 'error') return { color: '#ef4444', label: 'Error' };
-    if (enabled) return { color: '#3b82f6', label: 'Ready' };
-    return { color: '#6b7280', label: 'Offline' };
-  };
-  
-  const { color, label } = getStatusInfo();
-  
+  return (
+    <div className={`kernel-switch ${disabled ? 'disabled' : ''}`}>
+      <button
+        className={`switch-option ${value === 'custom' ? 'active' : ''}`}
+        onClick={() => !disabled && onChange('custom' as KernelType)}
+        disabled={disabled}
+      >
+        CUSTOM
+      </button>
+      <button
+        className={`switch-option ${value === 'kernel' ? 'active' : ''}`}
+        onClick={() => !disabled && onChange('kernel')}
+        disabled={disabled}
+      >
+        XV6
+      </button>
+    </div>
+  );
+};
+
+// Settings gear button
+const SettingsButton = ({ onClick, active }: { onClick: () => void; active: boolean }) => {
   return (
     <button 
       onClick={onClick}
-      className="network-badge"
+      className={`settings-btn ${active ? 'active' : ''}`}
       title="Network settings"
     >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2">
-        <circle cx="12" cy="12" r="10" />
-        <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
       </svg>
-      <span style={{ color }}>{label}</span>
     </button>
   );
 };
@@ -221,6 +244,40 @@ export default function Home() {
           actLed={leds.activity}
           netLed={netLed}
           onPowerClick={handlePowerClick}
+          inlineControls={
+            <>
+              {/* Kernel toggle switch */}
+              <KernelSwitch
+                value={selectedKernel}
+                onChange={setSelectedKernel}
+                disabled={isOn}
+              />
+              
+              {/* Stats display */}
+              <div className="stats-inline">
+                <div className="stat-inline">
+                  <span className="stat-label-inline">CPU</span>
+                  <div className="stat-bar-inline">
+                    <div className="stat-fill-inline cpu" style={{ width: `${cpuLoad}%` }} />
+                  </div>
+                  <span className="stat-value-inline">{cpuLoad.toFixed(0)}%</span>
+                </div>
+                <div className="stat-inline">
+                  <span className="stat-label-inline">MEM</span>
+                  <div className="stat-bar-inline">
+                    <div className="stat-fill-inline mem" style={{ width: `${Math.min(100, (memUsage / (128 * 1024 * 1024)) * 100)}%` }} />
+                  </div>
+                  <span className="stat-value-inline">{(memUsage / (1024 * 1024)).toFixed(0)}M</span>
+                </div>
+              </div>
+
+              {/* Settings gear button */}
+              <SettingsButton 
+                onClick={() => setShowNetworkPanel(!showNetworkPanel)}
+                active={showNetworkPanel}
+              />
+            </>
+          }
         >
           {/* CRT Screen */}
           <div className="crt-screen-3d">
@@ -260,48 +317,17 @@ export default function Home() {
           </div>
         </Computer3D>
 
-        {/* Control Panel (below computer) */}
-        <div className="control-panel">
-          {/* Kernel selector */}
-          <div className="control-group">
-            <label className="control-label">BOOT</label>
-            <select
-              value={selectedKernel}
-              onChange={(e) => setSelectedKernel(e.target.value as KernelType)}
-              disabled={isOn}
-              className="kernel-select-3d"
-            >
-              <option value="custom_kernel">Custom Kernel</option>
-              <option value="kernel">xv6 Linux</option>
-            </select>
-          </div>
-
-          {/* Stats */}
-          <div className="stats-group">
-            <div className="stat-item">
-              <span className="stat-label">CPU</span>
-              <div className="stat-bar">
-                <div className="stat-fill cpu" style={{ width: `${cpuLoad}%` }} />
-              </div>
-              <span className="stat-value">{cpuLoad.toFixed(0)}%</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-label">MEM</span>
-              <div className="stat-bar">
-                <div className="stat-fill mem" style={{ width: `${Math.min(100, (memUsage / (128 * 1024 * 1024)) * 100)}%` }} />
-              </div>
-              <span className="stat-value">{(memUsage / (1024 * 1024)).toFixed(0)}M</span>
-            </div>
-          </div>
-
-          {/* Network */}
-          <div className="control-group">
-            <NetworkBadge 
-              status={networkStatus} 
-              enabled={networkEnabled}
-              onClick={() => setShowNetworkPanel(!showNetworkPanel)}
-            />
-          </div>
+        {/* Mobile Controls (only shown on small screens) */}
+        <div className="mobile-controls">
+          <KernelSwitch
+            value={selectedKernel}
+            onChange={setSelectedKernel}
+            disabled={isOn}
+          />
+          <SettingsButton 
+            onClick={() => setShowNetworkPanel(!showNetworkPanel)}
+            active={showNetworkPanel}
+          />
         </div>
 
         {/* Network Panel (expandable) */}

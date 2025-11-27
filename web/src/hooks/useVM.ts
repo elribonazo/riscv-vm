@@ -1,9 +1,20 @@
 import { useRef, useState, useCallback } from 'react';
-import init, { WasmVm } from '../pkg/riscv_vm';
+import init, { WasmVm, NetworkStatus as WasmNetworkStatus } from '../pkg/riscv_vm';
 
 export type KernelType = 'custom' | 'kernel';
 export type VMStatus = 'off' | 'booting' | 'running' | 'error';
 export type NetworkStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+// Map WASM NetworkStatus enum to our string type
+function mapNetworkStatus(wasmStatus: WasmNetworkStatus): NetworkStatus {
+  switch (wasmStatus) {
+    case WasmNetworkStatus.Disconnected: return 'disconnected';
+    case WasmNetworkStatus.Connecting: return 'connecting';
+    case WasmNetworkStatus.Connected: return 'connected';
+    case WasmNetworkStatus.Error: return 'error';
+    default: return 'disconnected';
+  }
+}
 
 let wasmInitialized = false;
 
@@ -64,10 +75,16 @@ export function useVM() {
       setCpuLoad(load);
 
       // Query memory usage if the wasm exposes it
-      const anyVm = vm;
-      if (typeof anyVm.get_memory_usage === 'function') {
-        const usage = Number(anyVm.get_memory_usage());
+      if (typeof vm.get_memory_usage === 'function') {
+        const usage = Number(vm.get_memory_usage());
         setMemUsage(usage);
+      }
+      
+      // Poll network status from WASM
+      if (typeof vm.network_status === 'function') {
+        const wasmNetStatus = vm.network_status();
+        const mappedStatus = mapNetworkStatus(wasmNetStatus);
+        setNetworkStatus(mappedStatus);
       }
 
       // Drain output buffer (sanitize control chars)
@@ -152,22 +169,19 @@ export function useVM() {
       // Connect network BEFORE starting execution (so kernel sees VirtIO device at boot)
       if (networkEnabled) {
         try {
-          const anyVm = vm as any;
           // Prefer WebTransport if available
-          if (typeof anyVm.connect_webtransport === 'function') {
+          if (typeof vm.connect_webtransport === 'function') {
             const hashParam = certHash || undefined;
-            anyVm.connect_webtransport(relayUrl, hashParam);
-            setNetworkStatus('connecting');
-            console.log(`[Network] Connecting via WebTransport to ${relayUrl}`);
-          } else if (typeof anyVm.connect_network === 'function') {
+            vm.connect_webtransport(relayUrl, hashParam);
+            console.log(`[Network] Initiating WebTransport connection to ${relayUrl}`);
+          } else if (typeof vm.connect_network === 'function') {
             // Fallback to WebSocket if WebTransport not available
-            anyVm.connect_network(relayUrl);
-            setNetworkStatus('connected');
-            console.log(`[Network] Connected via WebSocket to ${relayUrl}`);
+            vm.connect_network(relayUrl);
+            console.log(`[Network] Initiating WebSocket connection to ${relayUrl}`);
           }
+          // Status will be updated by polling in the main loop
         } catch (err: any) {
           console.warn('[Network] Pre-boot connection failed:', err);
-          setNetworkStatus('error');
         }
       }
 
@@ -176,19 +190,12 @@ export function useVM() {
       setStatus("running");
       activeRef.current = true;
       
-      // After a short delay, check if WebTransport connected
-      setTimeout(() => {
-        if (networkEnabled && networkStatus === 'connecting') {
-          setNetworkStatus('connected');
-        }
-      }, 2000);
-      
       loop();
     } catch (err: any) {
       setStatus('error');
       setErrorMessage(err.message || String(err));
     }
-  }, [loop, networkEnabled, relayUrl, certHash, networkStatus]);
+  }, [loop, networkEnabled, relayUrl, certHash]);
 
   const shutdownVM = useCallback(() => {
     activeRef.current = false;
@@ -237,26 +244,21 @@ export function useVM() {
 
     const targetUrl = url || relayUrl;
     const targetHash = hash || certHash || undefined;
-    setNetworkStatus('connecting');
     
     try {
-      const anyVm = vm as any;
       // Prefer WebTransport
-      if (typeof anyVm.connect_webtransport === 'function') {
-        anyVm.connect_webtransport(targetUrl, targetHash);
-        setNetworkStatus('connected');
-        console.log(`[Network] Connected via WebTransport to ${targetUrl}`);
-      } else if (typeof anyVm.connect_network === 'function') {
-        anyVm.connect_network(targetUrl);
-        setNetworkStatus('connected');
-        console.log(`[Network] Connected via WebSocket to ${targetUrl}`);
+      if (typeof vm.connect_webtransport === 'function') {
+        vm.connect_webtransport(targetUrl, targetHash);
+        console.log(`[Network] Initiating WebTransport connection to ${targetUrl}`);
+      } else if (typeof vm.connect_network === 'function') {
+        vm.connect_network(targetUrl);
+        console.log(`[Network] Initiating WebSocket connection to ${targetUrl}`);
       } else {
         console.warn('[Network] No network method available - rebuild WASM');
-        setNetworkStatus('error');
       }
+      // Status will be updated by polling in the main loop
     } catch (err: any) {
       console.error('[Network] Connection error:', err);
-      setNetworkStatus('error');
     }
   }, [status, relayUrl, certHash]);
 
@@ -266,11 +268,10 @@ export function useVM() {
     if (!vm) return;
 
     try {
-      const anyVm = vm;
-      if (typeof anyVm.disconnect_network === 'function') {
-        anyVm.disconnect_network();
-        setNetworkStatus('disconnected');
+      if (typeof vm.disconnect_network === 'function') {
+        vm.disconnect_network();
         console.log('[Network] Disconnected');
+        // Status will be updated by polling in the main loop
       }
     } catch (err: any) {
       console.error('[Network] Disconnect error:', err);
