@@ -1727,7 +1727,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
 name = "relay"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "riscv-vm"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bincode",
  "clap",
