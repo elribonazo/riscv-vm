@@ -7,8 +7,9 @@ export type NetworkStatus = 'disconnected' | 'connecting' | 'connected' | 'error
 
 let wasmInitialized = false;
 
-// Default relay server URL
-const DEFAULT_WS_URL = process.env.NEXT_PUBLIC_RELAY_URL || 'ws://localhost:8765';
+// Default relay server URL and cert hash (WebTransport)
+const DEFAULT_RELAY_URL = process.env.NEXT_PUBLIC_RELAY_URL || 'https://localhost:4433';
+const DEFAULT_CERT_HASH = process.env.NEXT_PUBLIC_RELAY_CERT_HASH || '';
 
 // Get the base path for assets (handles GitHub Pages deployment)
 function getBasePath(): string {
@@ -42,7 +43,8 @@ export function useVM() {
   
   // Network state - enabled by default for better UX
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus>("disconnected");
-  const [wsUrl, setWsUrl] = useState<string>(DEFAULT_WS_URL);
+  const [relayUrl, setRelayUrl] = useState<string>(DEFAULT_RELAY_URL);
+  const [certHash, setCertHash] = useState<string>(DEFAULT_CERT_HASH);
   const [networkEnabled, setNetworkEnabled] = useState<boolean>(true);
 
   const loop = useCallback(() => {
@@ -150,11 +152,18 @@ export function useVM() {
       // Connect network BEFORE starting execution (so kernel sees VirtIO device at boot)
       if (networkEnabled) {
         try {
-          const anyVm = vm;
-          if (typeof anyVm.connect_network === 'function') {
-            anyVm.connect_network(wsUrl);
+          const anyVm = vm as any;
+          // Prefer WebTransport if available
+          if (typeof anyVm.connect_webtransport === 'function') {
+            const hashParam = certHash || undefined;
+            anyVm.connect_webtransport(relayUrl, hashParam);
+            setNetworkStatus('connecting');
+            console.log(`[Network] Connecting via WebTransport to ${relayUrl}`);
+          } else if (typeof anyVm.connect_network === 'function') {
+            // Fallback to WebSocket if WebTransport not available
+            anyVm.connect_network(relayUrl);
             setNetworkStatus('connected');
-            console.log(`[Network] Connected to ${wsUrl} (pre-boot)`);
+            console.log(`[Network] Connected via WebSocket to ${relayUrl}`);
           }
         } catch (err: any) {
           console.warn('[Network] Pre-boot connection failed:', err);
@@ -167,12 +176,19 @@ export function useVM() {
       setStatus("running");
       activeRef.current = true;
       
+      // After a short delay, check if WebTransport connected
+      setTimeout(() => {
+        if (networkEnabled && networkStatus === 'connecting') {
+          setNetworkStatus('connected');
+        }
+      }, 2000);
+      
       loop();
     } catch (err: any) {
       setStatus('error');
       setErrorMessage(err.message || String(err));
     }
-  }, [loop, networkEnabled, wsUrl]);
+  }, [loop, networkEnabled, relayUrl, certHash, networkStatus]);
 
   const shutdownVM = useCallback(() => {
     activeRef.current = false;
@@ -212,32 +228,37 @@ export function useVM() {
   }, [status]);
 
   // Connect to network relay server
-  const connectNetwork = useCallback((url?: string) => {
+  const connectNetwork = useCallback((url?: string, hash?: string) => {
     const vm = vmRef.current;
     if (!vm || status !== 'running') {
       console.warn('Cannot connect network: VM not running');
       return;
     }
 
-    const targetUrl = url || wsUrl;
+    const targetUrl = url || relayUrl;
+    const targetHash = hash || certHash || undefined;
     setNetworkStatus('connecting');
     
     try {
-      // Check if the method exists on the VM
       const anyVm = vm as any;
-      if (typeof anyVm.connect_network === 'function') {
+      // Prefer WebTransport
+      if (typeof anyVm.connect_webtransport === 'function') {
+        anyVm.connect_webtransport(targetUrl, targetHash);
+        setNetworkStatus('connected');
+        console.log(`[Network] Connected via WebTransport to ${targetUrl}`);
+      } else if (typeof anyVm.connect_network === 'function') {
         anyVm.connect_network(targetUrl);
         setNetworkStatus('connected');
-        console.log(`[Network] Connected to ${targetUrl}`);
+        console.log(`[Network] Connected via WebSocket to ${targetUrl}`);
       } else {
-        console.warn('[Network] connect_network method not available - rebuild WASM');
+        console.warn('[Network] No network method available - rebuild WASM');
         setNetworkStatus('error');
       }
     } catch (err: any) {
       console.error('[Network] Connection error:', err);
       setNetworkStatus('error');
     }
-  }, [status, wsUrl]);
+  }, [status, relayUrl, certHash]);
 
   // Disconnect from network
   const disconnectNetwork = useCallback(() => {
@@ -256,9 +277,14 @@ export function useVM() {
     }
   }, []);
 
-  // Update WebSocket URL
-  const updateWsUrl = useCallback((url: string) => {
-    setWsUrl(url);
+  // Update relay URL
+  const updateRelayUrl = useCallback((url: string) => {
+    setRelayUrl(url);
+  }, []);
+
+  // Update cert hash
+  const updateCertHash = useCallback((hash: string) => {
+    setCertHash(hash);
   }, []);
 
   // Toggle network enabled (before boot)
@@ -284,8 +310,10 @@ export function useVM() {
     // Network exports
     networkStatus,
     networkEnabled,
-    wsUrl,
-    updateWsUrl,
+    relayUrl,
+    certHash,
+    updateRelayUrl,
+    updateCertHash,
     connectNetwork,
     disconnectNetwork,
     toggleNetworkEnabled,

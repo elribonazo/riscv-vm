@@ -141,8 +141,10 @@ export default function Home() {
     shutdownVM,
     networkStatus,
     networkEnabled,
-    wsUrl,
-    updateWsUrl,
+    relayUrl,
+    certHash,
+    updateRelayUrl,
+    updateCertHash,
     connectNetwork,
     disconnectNetwork,
     toggleNetworkEnabled,
@@ -151,7 +153,8 @@ export default function Home() {
   const endRef = useRef<HTMLDivElement>(null);
   const [selectedKernel, setSelectedKernel] = useState<KernelType>("custom");
   const [showNetworkPanel, setShowNetworkPanel] = useState(false);
-  const [localWsUrl, setLocalWsUrl] = useState(wsUrl);
+  const [localRelayUrl, setLocalRelayUrl] = useState(relayUrl);
+  const [localCertHash, setLocalCertHash] = useState(certHash);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -190,13 +193,15 @@ export default function Home() {
 
   const handleNetworkToggle = () => {
     if (status === 'off') {
-      updateWsUrl(localWsUrl);
+      updateRelayUrl(localRelayUrl);
+      updateCertHash(localCertHash);
       toggleNetworkEnabled(!networkEnabled);
     } else if (networkStatus === 'connected') {
       disconnectNetwork();
     } else if (networkStatus === 'disconnected' && status === 'running') {
-      updateWsUrl(localWsUrl);
-      connectNetwork(localWsUrl);
+      updateRelayUrl(localRelayUrl);
+      updateCertHash(localCertHash);
+      connectNetwork(localRelayUrl, localCertHash);
     }
   };
 
@@ -311,10 +316,21 @@ export default function Home() {
                 <label>Relay URL</label>
                 <input
                   type="text"
-                  value={localWsUrl}
-                  onChange={(e) => setLocalWsUrl(e.target.value)}
+                  value={localRelayUrl}
+                  onChange={(e) => setLocalRelayUrl(e.target.value)}
                   disabled={isOn}
-                  placeholder="ws://localhost:8765"
+                  placeholder="https://localhost:4433"
+                  className="network-input"
+                />
+              </div>
+              <div className="network-row">
+                <label>Cert Hash</label>
+                <input
+                  type="text"
+                  value={localCertHash}
+                  onChange={(e) => setLocalCertHash(e.target.value)}
+                  disabled={isOn}
+                  placeholder="(optional, for self-signed certs)"
                   className="network-input"
                 />
               </div>

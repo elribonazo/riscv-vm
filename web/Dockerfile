@@ -1,8 +1,10 @@
 FROM node:20-slim AS web-builder
 
 ENV NODE_ENV=production
-ARG NEXT_PUBLIC_RELAY_URL=ws://localhost:8765
+ARG NEXT_PUBLIC_RELAY_URL=https://localhost:4433
+ARG NEXT_PUBLIC_RELAY_CERT_HASH=
 ENV NEXT_PUBLIC_RELAY_URL=${NEXT_PUBLIC_RELAY_URL}
+ENV NEXT_PUBLIC_RELAY_CERT_HASH=${NEXT_PUBLIC_RELAY_CERT_HASH}
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
@@ -45,4 +47,3 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 CMD ["yarn", "start"]
-
