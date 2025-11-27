@@ -32,7 +32,7 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Install dependencies
-        run: cd riscv-vm && yarn install
+        run: cd riscv-vm && corepack enable && yarn install
 
       - name: Update version
         run: |
