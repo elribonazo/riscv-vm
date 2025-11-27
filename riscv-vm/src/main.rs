@@ -42,6 +42,11 @@ struct Args {
     /// Works on macOS and in browser/WASM
     #[arg(long)]
     net_ws: Option<String>,
+
+    /// Connect to a libp2p relay for networking (e.g. /ip4/127.0.0.1/udp/4001/quic-v1/p2p/PEER_ID)
+    /// Supports NAT traversal and peer-to-peer connections
+    #[arg(long)]
+    net_libp2p: Option<String>,
 }
 
 // Debug helper: dump VirtIO MMIO identity registers expected by xv6.
@@ -105,6 +110,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bus.virtio_devices.push(Box::new(vnet));
         let base_addr = 0x1000_1000 + (device_idx as u64) * 0x1000;
         println!("VirtIO Net device (WebSocket: {}) attached at 0x{:x} (IRQ {})", ws_url, base_addr, irq);
+    } else if let Some(libp2p_addr) = &args.net_libp2p {
+        // Wire up VirtIO Net with libp2p backend (QUIC relay)
+        let libp2p_backend = riscv_vm::net_libp2p::Libp2pBackend::new(libp2p_addr);
+        let vnet = riscv_vm::virtio::VirtioNet::new(Box::new(libp2p_backend));
+        let device_idx = bus.virtio_devices.len();
+        let irq = 1 + device_idx;
+        bus.virtio_devices.push(Box::new(vnet));
+        let base_addr = 0x1000_1000 + (device_idx as u64) * 0x1000;
+        println!("VirtIO Net device (libp2p: {}) attached at 0x{:x} (IRQ {})", libp2p_addr, base_addr, irq);
     } else if args.net_dummy {
         // Wire up VirtIO Net with dummy backend (for testing)
         let dummy_backend = riscv_vm::net::DummyBackend::new();

@@ -255,6 +255,13 @@ impl NetState {
         addr.0 == IP_ADDR.0
     }
     
+    /// Check if an address is on the local subnet (10.0.2.x/24)
+    fn is_on_local_subnet(addr: &Ipv4Address) -> bool {
+        addr.0[0] == IP_ADDR.0[0] && 
+        addr.0[1] == IP_ADDR.0[1] && 
+        addr.0[2] == IP_ADDR.0[2]
+    }
+    
     /// Send an ICMP echo request (ping) - directly via VirtIO or loopback
     pub fn send_ping(&mut self, target: Ipv4Address, seq: u16, _timestamp_ms: i64) -> Result<(), &'static str> {
         // Handle loopback addresses (127.x.x.x) and self-ping locally
@@ -270,8 +277,15 @@ impl NetState {
         
         let target_bytes = target.0;
         
-        // Resolve destination MAC address
-        let dst_mac = self.resolve_mac(target_bytes)
+        // For external IPs (not on local subnet), route through gateway
+        let next_hop = if Self::is_on_local_subnet(&target) {
+            target_bytes
+        } else {
+            GATEWAY.0  // Use gateway for external destinations
+        };
+        
+        // Resolve MAC address for the next hop (gateway or direct target)
+        let dst_mac = self.resolve_mac(next_hop)
             .ok_or("Failed to resolve MAC address")?;
         
         // Build Ethernet + IP + ICMP packet

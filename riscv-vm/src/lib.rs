@@ -18,6 +18,9 @@ pub mod console;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net_tap;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod net_libp2p;
+
 use serde::{Deserialize, Serialize};
 
 // WASM bindings

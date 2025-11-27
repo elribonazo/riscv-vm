@@ -1,17 +1,56 @@
 [package]
-name = "net-relay"
+name = "relay"
 version = "0.1.0"
 edition = "2021"
-description = "WebSocket relay server for RISC-V VM networking"
-
-[workspace]
+description = "libp2p QUIC relay server for NAT traversal and peer connectivity"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.21"
-futures-util = "0.3"
-log = "0.4"
-env_logger = "0.10"
-clap = { version = "4.4", features = ["derive"] }
-socket2 = "0.5"
+# libp2p with required features for relay functionality
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "quic",
+    "relay",
+    "dcutr",
+    "identify",
+    "ping",
+    "gossipsub",
+    "noise",
+    "yamux",
+    "macros",
+    "tcp",
+    "dns",
+    "websocket",
+    "request-response",
+    "cbor",
+    "kad",
+    "autonat",
+] }
 
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# WebSocket server for browser bridge
+tokio-tungstenite = "0.24"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Serialization for messages
+serde = { version = "1.0", features = ["derive"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Utilities
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+
+# For peer ID generation
+bs58 = "0.5"

@@ -42,7 +42,8 @@ RISK-V is a RISC-V RV64GC virtual machine emulator built entirely in Rust. It ca
 - **Privilege Modes**: Machine (M), Supervisor (S), and User (U) modes
 - **Interrupt Controller**: PLIC (Platform-Level Interrupt Controller) and CLINT (Core Local Interruptor)
 - **UART**: 16550-compatible serial console for I/O
-- **VirtIO**: Block device support for disk images
+- **VirtIO**: Block and Network device support
+- **Networking**: Multiple backends (libp2p, WebSocket, TAP) with NAT traversal
 
 ### Web Interface
 - **Retro CRT Display**: Authentic scanline effect and phosphor glow
@@ -94,6 +95,192 @@ cargo run --release -- --kernel target/riscv64gc-unknown-none-elf/release/kernel
 
 ---
 
+## Networking
+
+The VM supports networking through VirtIO-net with multiple backend options. A libp2p-based relay service enables NAT traversal, peer-to-peer connectivity, and **external network access** (ping, DNS).
+
+### Network Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   VM Instance   │     │  libp2p Relay   │     │   VM Instance   │
+│  ┌───────────┐  │     │ + NAT Gateway   │     │  ┌───────────┐  │
+│  │  Kernel   │  │     │  • QUIC (4001)  │     │  │  Kernel   │  │
+│  │ (smoltcp) │  │     │  • TCP  (4002)  │     │  │ (smoltcp) │  │
+│  └─────┬─────┘  │     │  • WS   (8765)  │     │  └─────┬─────┘  │
+│        │        │     │  • Gossipsub    │     │        │        │
+│  ┌─────┴─────┐  │     │  • NAT Gateway  │     │  ┌─────┴─────┐  │
+│  │ VirtIO-net│  │◄───►│  • Circuit Relay│◄───►│  │ VirtIO-net│  │
+│  └───────────┘  │     │  • DCUtR        │     │  └───────────┘  │
+└─────────────────┘     │  • Kademlia DHT │     └─────────────────┘
+        │               └────────┬────────┘
+        │ NAT                    │ NAT
+        ▼                        ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                        External Internet                          │
+│               (ping 8.8.8.8, nslookup google.com)                │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Starting the Relay Service
+
+The relay enables VM-to-VM networking and NAT traversal:
+
+```bash
+# Build the relay
+cargo build --release -p relay
+
+# Start the relay (default ports: QUIC 4001, TCP 4002)
+./target/release/relay
+
+# With custom ports
+./target/release/relay --port 4001 --tcp-port 4002
+
+# With external address announcement (for public servers)
+./target/release/relay --external-addr "/ip4/YOUR_PUBLIC_IP/udp/4001/quic-v1"
+```
+
+The relay will output its **Peer ID** on startup — you'll need this to connect VMs:
+
+```
+Local peer ID: 12D3KooWSkQfZmVU4FJRErMfNgXvK7YWhR67te6weS8nVuNoE2Mf
+Listening on QUIC: /ip4/0.0.0.0/udp/4001/quic-v1
+Listening on TCP: /ip4/0.0.0.0/tcp/4002
+```
+
+### Connecting VMs to the Relay
+
+#### Option 1: libp2p (Recommended)
+
+Connect via QUIC for best performance and NAT traversal:
+
+```bash
+# Connect via QUIC (replace PEER_ID with the relay's peer ID)
+./target/release/riscv-vm --kernel kernel \
+    --net-libp2p "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/12D3KooW..."
+
+# Connect via TCP (fallback)
+./target/release/riscv-vm --kernel kernel \
+    --net-libp2p "/ip4/127.0.0.1/tcp/4002/p2p/12D3KooW..."
+
+# Connect to remote relay
+./target/release/riscv-vm --kernel kernel \
+    --net-libp2p "/ip4/RELAY_IP/udp/4001/quic-v1/p2p/PEER_ID"
+```
+
+#### Option 2: WebSocket (Legacy/Browser)
+
+For browser compatibility or simpler setups:
+
+```bash
+# Start the old WebSocket relay (if needed)
+# ./target/release/relay-ws --port 8765
+
+# Connect VM via WebSocket
+./target/release/riscv-vm --kernel kernel \
+    --net-ws "ws://localhost:8765"
+```
+
+#### Option 3: TAP Device (Linux only)
+
+For direct host networking:
+
+```bash
+# Create TAP interface
+sudo ip tuntap add dev tap0 mode tap
+sudo ip addr add 10.0.2.1/24 dev tap0
+sudo ip link set tap0 up
+
+# Run VM with TAP
+./target/release/riscv-vm --kernel kernel --net-tap tap0
+```
+
+#### Option 4: Dummy Backend (Testing)
+
+For testing without actual networking:
+
+```bash
+./target/release/riscv-vm --kernel kernel --net-dummy
+```
+
+### Relay Features
+
+| Feature | Description |
+|---------|-------------|
+| **QUIC Transport** | Fast, secure connections (UDP port 4001) |
+| **TCP Transport** | Fallback for restricted networks (port 4002) |
+| **WebSocket Bridge** | Browser compatibility (port 8765) |
+| **NAT Gateway** | Routes external traffic (ICMP/ping, UDP/DNS) to real internet |
+| **Circuit Relay v2** | NAT traversal for peers behind firewalls |
+| **DCUtR** | Direct Connection Upgrade through Relay (hole punching) |
+| **Gossipsub** | Pub/sub messaging for Ethernet frame broadcast |
+| **Kademlia DHT** | Distributed peer discovery |
+| **AutoNAT** | Automatic NAT detection |
+
+### Supported Scenarios
+
+| Scenario | Transport | How it Works |
+|----------|-----------|--------------|
+| **Server ↔ Server** | Direct QUIC | Peers connect directly when possible |
+| **Behind NAT** | Circuit Relay + DCUtR | Initial relay, then hole punching |
+| **Browser → Server** | TCP/WebSocket | Via relay bridge |
+| **Browser ↔ Browser** | Circuit Relay | Full relay for browser-to-browser |
+
+### Docker Deployment
+
+Run the relay in Docker:
+
+```bash
+# Build the image
+cd relay
+docker build -t riscv-relay .
+
+# Run the container
+docker run -d \
+    --name riscv-relay \
+    -p 4001:4001/udp \
+    -p 4002:4002 \
+    riscv-relay
+
+# With custom configuration
+docker run -d \
+    --name riscv-relay \
+    -p 4001:4001/udp \
+    -p 4002:4002 \
+    -e RUST_LOG=info \
+    riscv-relay \
+    /app/relay --port 4001 --tcp-port 4002
+```
+
+### Kernel Network Configuration
+
+The custom kernel uses these default network settings:
+
+| Setting | Value |
+|---------|-------|
+| VM IP Address | `10.0.2.15` |
+| Gateway | `10.0.2.2` |
+| Subnet Mask | `255.255.255.0` |
+| DNS Server | `8.8.8.8` |
+
+Test networking from the kernel:
+
+```bash
+# Ping the gateway (internal, always works)
+ping 10.0.2.2
+
+# Ping external host (requires NAT gateway - relay or native backend)
+ping 8.8.8.8
+
+# DNS lookup (requires NAT gateway)
+nslookup google.com
+
+# Ping resolved hostname
+ping google.com
+```
+
+---
+
 ## Architecture
 
 ### System Overview
@@ -134,7 +321,8 @@ cargo run --release -- --kernel target/riscv64gc-unknown-none-elf/release/kernel
 | `0x0C00_0000` | 64 MiB | PLIC (Interrupt Controller) |
 | `0x1000_0000` | 256 B | UART (Serial Console) |
 | `0x1000_1000` | 4 KiB | VirtIO Block Device |
-| `0x8000_0000` | 128 MiB | DRAM (Main Memory) |
+| `0x1000_2000` | 4 KiB | VirtIO Network Device |
+| `0x8000_0000` | 512 MiB | DRAM (Main Memory) |
 
 ### CPU Pipeline
 
@@ -152,7 +340,7 @@ The CPU executes instructions in a simple fetch-decode-execute cycle:
 
 ```
 risk-v/
-├── vm/                     # Virtual Machine (Rust)
+├── riscv-vm/               # Virtual Machine (Rust)
 │   ├── src/
 │   │   ├── main.rs         # CLI entry point
 │   │   ├── lib.rs          # WASM bindings
@@ -165,15 +353,28 @@ risk-v/
 │   │   ├── uart.rs         # 16550 UART emulation
 │   │   ├── clint.rs        # Core Local Interruptor
 │   │   ├── plic.rs         # Platform Interrupt Controller
-│   │   ├── virtio.rs       # VirtIO block device
+│   │   ├── virtio.rs       # VirtIO block & net devices
+│   │   ├── net.rs          # Network backend trait
+│   │   ├── net_tap.rs      # TAP network backend (Linux)
+│   │   ├── net_ws.rs       # WebSocket network backend
+│   │   ├── net_libp2p.rs   # libp2p network backend
 │   │   └── emulator.rs     # High-level emulator wrapper
 │   └── tests/              # Integration tests
+│
+├── relay/                  # libp2p Relay Service
+│   ├── src/
+│   │   └── main.rs         # Relay server implementation
+│   ├── Cargo.toml          # Dependencies (libp2p, tokio)
+│   └── Dockerfile          # Container deployment
 │
 ├── kernel/                 # Custom RISC-V Kernel (Rust)
 │   ├── src/
 │   │   ├── main.rs         # Kernel entry & CLI
 │   │   ├── uart.rs         # UART driver
-│   │   └── allocator.rs    # Heap allocator
+│   │   ├── allocator.rs    # Heap allocator
+│   │   ├── net.rs          # Network stack (smoltcp)
+│   │   ├── virtio_net.rs   # VirtIO network driver
+│   │   └── dns.rs          # DNS resolver
 │   ├── memory.x            # Memory layout
 │   ├── link.x              # Linker script
 │   └── .cargo/config.toml  # Build target config
@@ -408,10 +609,11 @@ RUST_LOG=trace cargo run --release -- --kernel target/riscv64gc-unknown-none-elf
 Contributions are welcome! Areas of interest:
 
 - [ ] Implement more RISC-V extensions (V for vectors, B for bit manipulation)
-- [ ] Add networking (VirtIO-net)
+- [x] ~~Add networking (VirtIO-net)~~ — **Done!** libp2p relay with QUIC, NAT traversal
 - [ ] Improve performance with JIT compilation
 - [ ] Add GDB stub for debugging
 - [ ] Port more operating systems
+- [ ] WebRTC transport for browser-to-browser networking
 
 ---
 
