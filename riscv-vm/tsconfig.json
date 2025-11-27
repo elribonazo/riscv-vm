@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "outDir": "build",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "target": "es2022",
+    "module": "es2022",
+    "declaration": true,
+    "emitDeclarationOnly": false,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleDetection": "force",
+    "strict": true,
+    "lib": ["ES2022", "DOM"],
+  },
+  "include": ["pkg", "index.ts"],
+  "exclude": ["node_modules", "build"]
+}

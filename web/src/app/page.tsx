@@ -97,11 +97,11 @@ const KernelSwitch = ({
         onClick={() => !disabled && onChange('custom' as KernelType)}
         disabled={disabled}
       >
-        CUSTOM
+        HavyOS
       </button>
       <button
-        className={`switch-option ${value === 'kernel' ? 'active' : ''}`}
-        onClick={() => !disabled && onChange('kernel')}
+        className={`switch-option ${value === 'xv6' ? 'active' : ''}`}
+        onClick={() => !disabled && onChange('xv6')}
         disabled={disabled}
       >
         XV6
@@ -387,7 +387,7 @@ export default function Home() {
           <span className="sep">•</span>
           <span>128 MiB</span>
           <span className="sep">•</span>
-          <span>{currentKernel === "kernel" ? "xv6" : currentKernel === "custom" ? "Custom" : "Ready"}</span>
+          <span>{currentKernel === "xv6" ? "xv6" : currentKernel === "custom" ? "HavyOS" : "Ready"}</span>
           {networkStatus === 'connected' && (
             <>
               <span className="sep">•</span>

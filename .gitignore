@@ -2,3 +2,6 @@ target
 public/*.wasm
 public/custom_kernel
 certs
+riscv-vm/pkg
+riscv-vm/build
+node_modules

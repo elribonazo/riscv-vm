@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback } from 'react';
-import init, { WasmVm, NetworkStatus as WasmNetworkStatus } from '../pkg/riscv_vm';
+import   {  NetworkStatus as WasmNetworkStatus, WasmVm } from 'virtual-machine';
 
-export type KernelType = 'custom' | 'kernel';
+export type KernelType = 'custom' | 'xv6';
 export type VMStatus = 'off' | 'booting' | 'running' | 'error';
 export type NetworkStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -15,8 +15,6 @@ function mapNetworkStatus(wasmStatus: WasmNetworkStatus): NetworkStatus {
     default: return 'disconnected';
   }
 }
-
-let wasmInitialized = false;
 
 // Default relay server URL and cert hash (WebTransport)
 const DEFAULT_RELAY_URL = process.env.NEXT_PUBLIC_RELAY_URL || 'https://localhost:4433';
@@ -138,11 +136,9 @@ export function useVM() {
     setMemUsage(0);
 
     try {
-      // Initialize WASM only once
-      if (!wasmInitialized) {
-        await init(assetPath('/riscv_vm_bg.wasm'));
-        wasmInitialized = true;
-      }
+      const VM = await import('virtual-machine');
+      const wasm = await VM.WasmInternal();
+      const WasmVm = wasm.WasmVm;
 
       // Load kernel
       const kernelRes = await fetch(assetPath(`/images/${kernelType}/kernel`));
@@ -153,9 +149,9 @@ export function useVM() {
       const vm = new WasmVm(kernelBytes);
       
       // Load disk image for xv6 kernel
-      if (kernelType === 'kernel') {
+      if (kernelType === 'xv6') {
         try {
-          const diskRes = await fetch(assetPath('/images/fs.img'));
+          const diskRes = await fetch(assetPath(`/images/${kernelType}/fs.img`));
           if (diskRes.ok) {
             const diskBuf = await diskRes.arrayBuffer();
             const diskBytes = new Uint8Array(diskBuf);
