@@ -1,35 +1,36 @@
-//! WebTransport Relay Server with User-Space Networking
+//! P2P WebTransport Relay Server
 //!
-//! A simplified relay server that enables:
-//! - Browser to Server connectivity via WebTransport
-//! - User-Space NAT Gateway (Slirp) for external network access
-//! - Virtual Network Switch behavior (broadcasts traffic between clients)
+//! A central hub relay server that enables:
+//! - Browser <-> Browser connectivity via WebTransport
+//! - Browser <-> Server connectivity
+//! - Server <-> Server connectivity
+//! - Virtual network with DHCP-like IP assignment (10.0.2.x)
+//! - External traffic proxy (DNS, ICMP) for VMs
 
-mod gateway;
-// mod stack; // TODO: Integrate smoltcp stack later for full TCP support
+mod hub;
+mod peer;
+mod protocol;
+mod proxy;
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
-use wtransport::Identity;
-use wtransport::{Endpoint, ServerConfig};
+use wtransport::{Endpoint, Identity, ServerConfig};
 
-use crate::gateway::{
-    generate_arp_reply, generate_icmp_reply, is_arp_request_for_gateway,
-    is_external_ipv4_packet, is_icmp_echo_request_to_gateway, is_icmp_packet,
-    is_udp_packet, NatGateway,
-};
+use crate::hub::{Hub, PeerMessage};
+use crate::peer::PeerId;
+use crate::protocol::{encode_data_frame, ControlMessage, MSG_TYPE_CONTROL};
 
 #[derive(Parser, Debug)]
 #[command(
     author,
     version,
-    about = "WebTransport Relay Server for NAT traversal and peer connectivity"
+    about = "P2P WebTransport Relay Server for RISC-V VM networking"
 )]
 struct Args {
     /// Port to listen on (UDP/QUIC)
@@ -39,90 +40,71 @@ struct Args {
     /// Bind address
     #[arg(short, long, default_value = "0.0.0.0")]
     bind: String,
-}
 
-/// Run the NAT UDP response receiver loop
-async fn run_nat_udp_receiver(
-    nat_gateway: Arc<Mutex<NatGateway>>,
-    nat_response_tx: broadcast::Sender<Vec<u8>>,
-) {
-    loop {
-        let socket = {
-            let nat = nat_gateway.lock().await;
-            nat.udp_socket.clone()
-        };
-        
-        if let Some(socket) = socket {
-            let mut buf = [0u8; 2048];
-            loop {
-                match socket.recv_from(&mut buf).await {
-                    Ok((n, src_addr)) => {
-                        let frame = {
-                            let mut nat = nat_gateway.lock().await;
-                            nat.handle_incoming_udp(&buf, src_addr, n)
-                        };
-                        
-                        if let Some(frame) = frame {
-                            let _ = nat_response_tx.send(frame);
-                        }
-                    }
-                    Err(_) => break, // Re-acquire socket on error
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    /// Heartbeat interval in seconds
+    #[arg(long, default_value_t = 30)]
+    heartbeat_interval: u64,
+
+    /// Peer timeout in seconds
+    #[arg(long, default_value_t = 90)]
+    peer_timeout: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let args = Args::parse();
 
-    info!("Starting WebTransport Relay Server (User-Space Mode)...");
-    info!("This relay runs without kernel NAT/capabilities.");
-    
+    info!("Starting P2P WebTransport Relay Server...");
+    info!("Virtual Network: 10.0.2.0/24, Gateway: 10.0.2.2");
+
     // Generate self-signed certificate
-    let identity = Identity::self_signed(["localhost", "127.0.0.1", "::1"]).unwrap();
-    info!("Certificate Hash (use this in client): {}", identity.certificate_chain().as_slice().first().unwrap().hash());
+    let identity = Identity::self_signed(["localhost", "127.0.0.1", "::1"])?;
+    let cert_hash = identity
+        .certificate_chain()
+        .as_slice()
+        .first()
+        .unwrap()
+        .hash();
+    // Format hash without colons for easy copy-paste
+    let cert_hash_hex = format!("{}", cert_hash).replace(":", "");
+    info!("Certificate Hash: {}", cert_hash_hex);
+    info!("Use this hash with --net-cert-hash when connecting");
 
-    // Create virtual switch (broadcast channel)
-    // Packets from any client are broadcast to all other clients
-    let (switch_tx, _) = broadcast::channel::<Vec<u8>>(1024);
+    // Create the central hub
+    let hub = Arc::new(Hub::new());
 
-    // Create NAT gateway (User-Space)
-    let (nat_response_tx, _) = broadcast::channel::<Vec<u8>>(1024);
-    let mut nat_gateway = NatGateway::new(nat_response_tx.clone());
-    if let Err(e) = nat_gateway.init().await {
-        warn!("Failed to initialize NAT gateway: {}", e);
+    // Initialize the external proxy
+    if let Err(e) = hub.proxy().init().await {
+        warn!("Failed to initialize external proxy: {}", e);
     }
-    let nat_gateway = Arc::new(Mutex::new(nat_gateway));
 
-    // Start NAT UDP receiver
-    let nat_gateway_clone = nat_gateway.clone();
-    let nat_response_tx_clone = nat_response_tx.clone();
+    // Spawn the UDP response receiver for external proxy
+    let hub_clone = hub.clone();
     tokio::spawn(async move {
-        run_nat_udp_receiver(nat_gateway_clone, nat_response_tx_clone).await;
+        run_proxy_receiver(hub_clone).await;
     });
 
-    // Bridge NAT responses to the switch
-    let switch_tx_nat = switch_tx.clone();
-    let mut nat_rx = nat_response_tx.subscribe();
+    // Spawn the peer cleanup task
+    let hub_clone = hub.clone();
+    let timeout = args.peer_timeout;
     tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(timeout / 3));
         loop {
-            if let Ok(frame) = nat_rx.recv().await {
-                let _ = switch_tx_nat.send(frame);
-            }
+            interval.tick().await;
+            hub_clone.cleanup_expired_peers().await;
+            hub_clone.log_stats().await;
         }
     });
 
     // Setup WebTransport server
-    let ip: std::net::IpAddr = args.bind.parse()?;
-    let socket_addr = SocketAddr::new(ip, args.port);
+    let socket_addr = format!("{}:{}", args.bind, args.port).parse()?;
 
     let config = ServerConfig::builder()
         .with_bind_address(socket_addr)
@@ -136,89 +118,185 @@ async fn main() -> Result<()> {
     // Accept incoming sessions
     loop {
         let incoming_session = endpoint.accept().await;
-        
-        let switch_tx = switch_tx.clone();
-        let nat_gateway = nat_gateway.clone();
+        let hub = hub.clone();
 
         tokio::spawn(async move {
-            let request = match incoming_session.await {
-                Ok(req) => req,
-                Err(e) => {
-                    warn!("Connection failed during handshake: {}", e);
-                    return;
-                }
-            };
+            if let Err(e) = handle_connection(incoming_session, hub).await {
+                warn!("Connection error: {}", e);
+            }
+        });
+    }
+}
 
-            info!("New connection from {:?}", request.remote_address());
+/// Handle a single WebTransport connection
+async fn handle_connection(
+    incoming: wtransport::endpoint::IncomingSession,
+    hub: Arc<Hub>,
+) -> Result<()> {
+    let request = incoming.await?;
+    info!("New connection from {:?}", request.remote_address());
 
-            let connection = match request.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    warn!("Failed to accept connection: {}", e);
-                    return;
-                }
-            };
+    let connection = request.accept().await?;
+    info!("Session established with {:?}", connection.remote_address());
 
-            info!("Session established with {:?}", connection.remote_address());
+    // Create channel for sending to this peer
+    let (tx, mut rx) = mpsc::channel::<PeerMessage>(256);
 
-            // Handle the connection
-            let mut switch_rx = switch_tx.subscribe();
-            
-            loop {
-                tokio::select! {
-                    // Receive from client
-                    result = connection.receive_datagram() => {
-                        match result {
-                            Ok(datagram) => {
-                                let data = datagram.to_vec();
-                                // Handle Gateway logic locally if applicable
-                                let mut handled = false;
-                                
-                                if is_arp_request_for_gateway(&data) {
-                                    let reply = generate_arp_reply(&data);
-                                    let _ = connection.send_datagram(reply);
-                                    handled = true;
-                                } else if is_icmp_echo_request_to_gateway(&data) {
-                                    let reply = generate_icmp_reply(&data);
-                                    let _ = connection.send_datagram(reply);
-                                    handled = true;
-                                } else if is_external_ipv4_packet(&data) {
-                                    let mut nat = nat_gateway.lock().await;
-                                    if is_icmp_packet(&data) {
-                                        if nat.process_icmp_outbound(&data).await.is_some() {
-                                            handled = true;
-                                        }
-                                    } else if is_udp_packet(&data) {
-                                        if nat.process_udp_outbound(&data).await.is_some() {
-                                            handled = true;
-                                        }
+    // Wait for registration message
+    let peer_id: PeerId;
+    let assigned_ip: [u8; 4];
+
+    loop {
+        tokio::select! {
+            result = connection.receive_datagram() => {
+                match result {
+                    Ok(datagram) => {
+                        let data = datagram.to_vec();
+                        if !data.is_empty() && data[0] == MSG_TYPE_CONTROL {
+                            if let Ok(ControlMessage::Register { mac }) = ControlMessage::decode(&data) {
+                                // Register the peer
+                                match hub.register_peer(mac, tx.clone()).await {
+                                    Some((id, ip)) => {
+                                        peer_id = id;
+                                        assigned_ip = ip;
+                                        info!(
+                                            "Peer {} registered: MAC={}, IP={}",
+                                            peer_id,
+                                            protocol::format_mac(&mac),
+                                            protocol::format_ip(&ip)
+                                        );
+                                        break;
+                                    }
+                                    None => {
+                                        let err = ControlMessage::Error {
+                                            message: "IP pool exhausted".to_string(),
+                                        };
+                                        let _ = connection.send_datagram(err.encode());
+                                        return Ok(());
                                     }
                                 }
-
-                                // If not handled by gateway (or even if it was, maybe we broadcast?)
-                                // Typically if it's unicast to gateway, we don't broadcast.
-                                // If it's broadcast ARP, we broadcast.
-                                if !handled {
-                                    // Forward to switch (other VMs)
-                                    let _ = switch_tx.send(data);
-                                }
-                            }
-                            Err(e) => {
-                                info!("Connection closed: {}", e);
-                                break;
                             }
                         }
                     }
-                    
-                    // Send to client (from switch/NAT)
-                    Ok(data) = switch_rx.recv() => {
-                        if let Err(e) = connection.send_datagram(data) {
-                             warn!("Failed to send datagram: {}", e);
-                             // break? Or just continue?
-                        }
+                    Err(e) => {
+                        warn!("Connection closed during registration: {}", e);
+                        return Ok(());
                     }
                 }
             }
-        });
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                warn!("Registration timeout");
+                return Ok(());
+            }
+        }
+    }
+
+    // Subscribe to broadcast channel
+    let mut broadcast_rx = hub.subscribe();
+
+    // Main message loop
+    loop {
+        tokio::select! {
+            // Receive from client
+            result = connection.receive_datagram() => {
+                match result {
+                    Ok(datagram) => {
+                        let data = datagram.to_vec();
+                        hub.touch_peer(peer_id).await;
+                        hub.route_frame(peer_id, data).await;
+                    }
+                    Err(e) => {
+                        info!("Peer {} disconnected: {}", peer_id, e);
+                        break;
+                    }
+                }
+            }
+
+            // Send to client (from hub routing)
+            Some(msg) = rx.recv() => {
+                match msg {
+                    PeerMessage::Send(data) => {
+                        if let Err(e) = connection.send_datagram(data) {
+                            warn!("Failed to send to peer {}: {}", peer_id, e);
+                            break;
+                        }
+                    }
+                    PeerMessage::Disconnect => {
+                        info!("Peer {} kicked by hub", peer_id);
+                        break;
+                    }
+                }
+            }
+
+            // Broadcast messages (from other peers)
+            Ok((from_peer, data)) = broadcast_rx.recv() => {
+                if from_peer != peer_id {
+                    if let Err(e) = connection.send_datagram(data) {
+                        warn!("Failed to broadcast to peer {}: {}", peer_id, e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    hub.unregister_peer(peer_id).await;
+    info!(
+        "Peer {} unregistered (IP {})",
+        peer_id,
+        protocol::format_ip(&assigned_ip)
+    );
+
+    Ok(())
+}
+
+/// Run the external proxy UDP receiver loop
+async fn run_proxy_receiver(hub: Arc<Hub>) {
+    loop {
+        let socket = hub.proxy().udp_socket().await;
+
+        if let Some(socket) = socket {
+            let mut buf = [0u8; 2048];
+            loop {
+                match socket.recv_from(&mut buf).await {
+                    Ok((n, src_addr)) => {
+                        if let Some(response_frame) =
+                            hub.proxy().handle_incoming_udp(&buf, src_addr, n).await
+                        {
+                            // Need to send this response to the right peer
+                            // The response frame contains the destination MAC/IP
+                            // which we can use to route it
+                            broadcast_response(&hub, &response_frame).await;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Proxy UDP recv error: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Broadcast a proxy response to the appropriate peer
+async fn broadcast_response(hub: &Hub, ethernet_frame: &[u8]) {
+    if ethernet_frame.len() < 14 {
+        return;
+    }
+
+    let dst_mac: [u8; 6] = ethernet_frame[0..6].try_into().unwrap();
+
+    // Find the peer with this MAC
+    let peers_arc = hub.peers();
+    let peers = peers_arc.read().await;
+    if let Some(peer) = peers.find_by_mac(&dst_mac) {
+        let peer_id = peer.id;
+        drop(peers);
+        hub.send_to_peer(peer_id, encode_data_frame(ethernet_frame))
+            .await;
     }
 }

@@ -2,11 +2,11 @@
 name = "relay"
 version = "0.1.0"
 edition = "2021"
-description = "WebTransport Relay Server for RISC-V VM"
+description = "P2P WebTransport Relay Server for RISC-V VM networking"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "process"] }
 
 # WebTransport
 wtransport = "0.6.1"
@@ -21,10 +21,6 @@ clap = { version = "4.4", features = ["derive"] }
 # Error handling
 anyhow = "1.0"
 
-# Utilities
-rand = "0.8"
-
-# Serialization (if needed for structured messages)
+# Serialization for protocol messages
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-smoltcp = "0.12.0"
