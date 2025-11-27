@@ -38,9 +38,26 @@ async function createVm(
     certHash?: string;
   },
 ) {
-  const resolvedKernel = path.resolve(kernelPath);
-  const kernelBuf =  fs.readFileSync(resolvedKernel);
-  const kernelBytes = new Uint8Array(kernelBuf);
+  let kernelBytes: Uint8Array;
+
+  if (kernelPath.startsWith('http://') || kernelPath.startsWith('https://')) {
+    console.error(`[CLI] Downloading kernel from ${kernelPath}...`);
+    const response = await fetch(kernelPath);
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch kernel from ${kernelPath}: ${response.statusText}`,
+      );
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    kernelBytes = new Uint8Array(arrayBuffer);
+  } else {
+    const resolvedKernel = path.resolve(kernelPath);
+    if (!fs.existsSync(resolvedKernel)) {
+      throw new Error(`Kernel file not found at ${resolvedKernel}`);
+    }
+    const kernelBuf = fs.readFileSync(resolvedKernel);
+    kernelBytes = new Uint8Array(kernelBuf);
+  }
 
   const { WasmInternal } = await import('./');
   const wasm = await WasmInternal();
