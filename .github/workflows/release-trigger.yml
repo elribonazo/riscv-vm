@@ -24,14 +24,14 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: "npm"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
-        run: yarn install
+        run: corepack enable && yarn install
 
       - name: Configure Git
         run: |
