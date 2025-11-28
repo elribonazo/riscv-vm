@@ -7,7 +7,9 @@
         "command": "cargo build --release",
         "cwd": "relay"
       },
-      "outputs": ["{workspaceRoot}/target/release/relay"]
+      "outputs": [
+        "{workspaceRoot}/target/release/relay"
+      ]
     },
     "test": {
       "executor": "nx:run-commands",

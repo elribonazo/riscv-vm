@@ -1,10 +1,23 @@
 {
   "extends": "nx/presets/npm.json",
-  "plugins": ["@monodon/rust"],
+  "plugins": [
+    "@monodon/rust"
+  ],
   "release": {
-    "projects": ["riscv-vm", "kernel", "relay"],
+    "projects": [
+      "riscv-vm",
+      "kernel",
+      "relay"
+    ],
+    "version": {
+      "specifierSource": "conventional-commits",
+      "currentVersionResolver": "git-tag",
+      "fallbackCurrentVersionResolver": "disk",
+      "versionActions": "./scripts/release-version-action.js"
+    },
     "projectsRelationship": "independent",
     "changelog": {
+      "automaticFromRef": true,
       "projectChangelogs": {
         "renderOptions": {
           "authors": true
@@ -16,9 +29,6 @@
     "git": {
       "commit": true,
       "tag": true
-    },
-    "version": {
-      "conventionalCommits": true
     }
   }
 }

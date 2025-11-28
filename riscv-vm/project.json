@@ -1,12 +1,25 @@
 {
   "name": "riscv-vm",
+  "release": {
+    "version": {
+      "generator": "@nx/js:release-version",
+      "generatorOptions": {
+        "packageRoot": "riscv-vm",
+        "currentVersionResolver": "git-tag",
+        "fallbackCurrentVersionResolver": "disk"
+      }
+    }
+  },
   "targets": {
     "build": {
       "executor": "nx:run-script",
       "options": {
         "script": "build"
       },
-      "outputs": ["{projectRoot}/build", "{projectRoot}/pkg"]
+      "outputs": [
+        "{projectRoot}/build",
+        "{projectRoot}/pkg"
+      ]
     },
     "lint": {
       "executor": "nx:run-commands",
