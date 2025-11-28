@@ -5,3 +5,4 @@ certs
 riscv-vm/pkg
 riscv-vm/build
 node_modules
+.nx/

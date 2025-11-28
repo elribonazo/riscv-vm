@@ -9,6 +9,10 @@
   "main": "./build/index.js",
   "module": "./build/index.mjs",
   "types": "./build/index.d.ts",
+  "files": [
+    "build",
+    "pkg"
+  ],
   "scripts": {
     "build": "rm -rf build && sh build.sh"
   },

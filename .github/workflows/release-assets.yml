@@ -1,0 +1,105 @@
+name: Release Assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-assets:
+    name: Build ${{ matrix.project }} ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Kernel
+          - project: kernel
+            os: ubuntu-latest
+            target: riscv64gc-unknown-none-elf
+            binary_name: kernel
+            asset_name: kernel
+
+          # RISC-V VM
+          - project: riscv-vm
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: riscv-vm
+            asset_name: riscv-vm-linux-amd64
+          - project: riscv-vm
+            os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: riscv-vm
+            asset_name: riscv-vm-darwin-amd64
+          - project: riscv-vm
+            os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: riscv-vm
+            asset_name: riscv-vm-darwin-arm64
+
+          # Relay
+          - project: relay
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: relay
+            asset_name: relay-linux-amd64
+          - project: relay
+            os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: relay
+            asset_name: relay-darwin-amd64
+          - project: relay
+            os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: relay
+            asset_name: relay-darwin-arm64
+
+    steps:
+      - name: Check if project matches tag
+        id: check-project
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          PROJECT="${{ matrix.project }}"
+          if [[ "$TAG_NAME" == "$PROJECT-"* ]]; then
+            echo "match=true" >> $GITHUB_OUTPUT
+          else
+            echo "match=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - uses: actions/checkout@v4
+        if: steps.check-project.outputs.match == 'true'
+
+      - name: Setup Rust
+        if: steps.check-project.outputs.match == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        if: steps.check-project.outputs.match == 'true'
+        run: cargo build -p ${{ matrix.project }} --release --target ${{ matrix.target }}
+
+      - name: Prepare Artifact
+        if: steps.check-project.outputs.match == 'true'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          # Handle potential .exe extension or simple rename
+          if [ -f "${{ matrix.binary_name }}" ]; then
+             mv "${{ matrix.binary_name }}" "${{ matrix.asset_name }}"
+          else
+             echo "Binary not found!"
+             exit 1
+          fi
+
+      - name: Upload Release Asset
+        if: steps.check-project.outputs.match == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

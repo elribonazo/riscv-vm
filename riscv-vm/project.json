@@ -1,0 +1,35 @@
+{
+  "name": "riscv-vm",
+  "targets": {
+    "build": {
+      "executor": "nx:run-script",
+      "options": {
+        "script": "build"
+      },
+      "outputs": ["{projectRoot}/build", "{projectRoot}/pkg"]
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo clippy",
+        "cwd": "riscv-vm"
+      }
+    },
+    "test-rust": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo test",
+        "cwd": "riscv-vm"
+      }
+    },
+    "nx-release-publish": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm publish --provenance --access public",
+        "cwd": "riscv-vm",
+        "parallel": false
+      },
+      "dependsOn": ["build"]
+    }
+  }
+}
