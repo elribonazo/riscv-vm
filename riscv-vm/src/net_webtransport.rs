@@ -6,7 +6,6 @@
 //! - 0x01 prefix: Ethernet data frames
 
 use crate::net::NetworkBackend;
-use std::sync::Arc;
 
 /// Message type prefix for control messages
 const MSG_TYPE_CONTROL: u8 = 0x00;
@@ -68,6 +67,7 @@ fn decode_message(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::*;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::thread;

@@ -93,11 +93,6 @@ impl IpPool {
             && ip[1] == self.network_prefix[1]
             && ip[2] == self.network_prefix[2]
     }
-
-    /// Get the number of available addresses
-    pub fn available_count(&self) -> usize {
-        self.available.len()
-    }
 }
 
 impl Default for IpPool {
@@ -190,29 +185,14 @@ impl PeerManager {
         }
     }
 
-    /// Get a peer by ID
-    pub fn get(&self, peer_id: PeerId) -> Option<&Peer> {
-        self.peers.get(&peer_id)
-    }
-
     /// Find peer by MAC address
     pub fn find_by_mac(&self, mac: &[u8; 6]) -> Option<&Peer> {
         self.mac_to_peer.get(mac).and_then(|id| self.peers.get(id))
     }
 
-    /// Find peer by IP address
-    pub fn find_by_ip(&self, ip: &[u8; 4]) -> Option<&Peer> {
-        self.ip_to_peer.get(ip).and_then(|id| self.peers.get(id))
-    }
-
     /// Get peer ID by IP address
     pub fn peer_id_by_ip(&self, ip: &[u8; 4]) -> Option<PeerId> {
         self.ip_to_peer.get(ip).copied()
-    }
-
-    /// Get all peer IDs (for broadcasting)
-    pub fn all_peer_ids(&self) -> Vec<PeerId> {
-        self.peers.keys().copied().collect()
     }
 
     /// Get all peers (for peer list message)

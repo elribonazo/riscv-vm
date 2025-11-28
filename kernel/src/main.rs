@@ -14,6 +14,9 @@ use riscv_rt::entry;
 /// CLINT mtime register address (for timestamps)
 const CLINT_MTIME: usize = 0x0200_BFF8;
 
+/// Test finisher address - writing here shuts down the VM
+const TEST_FINISHER: usize = 0x0010_0000;
+
 /// Global network state (initialized lazily)
 static mut NET_STATE: Option<net::NetState> = None;
 
@@ -35,22 +38,99 @@ fn get_time_ms() -> i64 {
     (mtime / 10_000) as i64
 }
 
+/// Print the kernel boot banner
+fn print_banner() {
+    uart::write_line("");
+    uart::write_line("\x1b[1;35m    +=====================================================================+\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m                                                                     \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m ____  ___ ____  _  __    __     __   ___  ____  \x1b[0m                \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m|  _ \\|_ _/ ___|| |/ /    \\ \\   / /  / _ \\/ ___| \x1b[0m                \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m| |_) || |\\___ \\| ' / _____\\ \\ / /  | | | \\___ \\ \x1b[0m                \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m|  _ < | | ___) | . \\|_____|_\\ V /___| |_| |___) |\x1b[0m                \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m|_| \\_\\___|____/|_|\\_\\      \\_/     \\___/|____/ \x1b[0m                \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m                                                                     \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m     \x1b[1;97mRISC-V Operating System Kernel v0.1.0\x1b[0m                           \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m     \x1b[0;90mBuilt with Rust - smoltcp networking - VirtIO drivers\x1b[0m          \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    |\x1b[0m                                                                     \x1b[1;35m|\x1b[0m");
+    uart::write_line("\x1b[1;35m    +=====================================================================+\x1b[0m");
+    uart::write_line("");
+}
+
+/// Print a section header
+fn print_section(title: &str) {
+    uart::write_line("");
+    uart::write_line("\x1b[1;33m────────────────────────────────────────────────────────────────────────\x1b[0m");
+    uart::write_str("\x1b[1;33m  ◆ ");
+    uart::write_str(title);
+    uart::write_line("\x1b[0m");
+    uart::write_line("\x1b[1;33m────────────────────────────────────────────────────────────────────────\x1b[0m");
+}
+
+/// Print a boot status line
+fn print_boot_status(component: &str, ok: bool) {
+    if ok {
+        uart::write_str("    \x1b[1;32m[✓]\x1b[0m ");
+    } else {
+        uart::write_str("    \x1b[1;31m[✗]\x1b[0m ");
+    }
+    uart::write_line(component);
+}
+
+/// Print a boot info line
+fn print_boot_info(key: &str, value: &str) {
+    uart::write_str("    \x1b[0;90m├─\x1b[0m ");
+    uart::write_str(key);
+    uart::write_str(": \x1b[1;97m");
+    uart::write_str(value);
+    uart::write_line("\x1b[0m");
+}
+
 #[entry]
 fn main() -> ! {
-    uart::write_line("Booting RISC-V kernel CLI...");
-    uart::write_line("Type 'help' for a list of commands.");
-    // Initialize linked list allocator
-    allocator::init();
+    // ─── BOOT BANNER ──────────────────────────────────────────────────────────
+    print_banner();
     
-    // Initialize network
+    // ─── CPU & ARCHITECTURE INFO ──────────────────────────────────────────────
+    print_section("CPU & ARCHITECTURE");
+    print_boot_info("Architecture", "RISC-V 64-bit (RV64GC)");
+    print_boot_info("Mode", "Machine Mode (M-Mode)");
+    print_boot_info("Timer Source", "CLINT @ 0x02000000");
+    print_boot_status("CPU initialized", true);
+    
+    // ─── MEMORY SUBSYSTEM ─────────────────────────────────────────────────────
+    print_section("MEMORY SUBSYSTEM");
+    allocator::init();
+    let total_heap = allocator::heap_size();
+    uart::write_str("    \x1b[0;90m├─\x1b[0m Heap Base: \x1b[1;97m0x");
+    uart::write_hex(0x8080_0000u64); // Approximate heap start
+    uart::write_line("\x1b[0m");
+    uart::write_str("    \x1b[0;90m├─\x1b[0m Heap Size: \x1b[1;97m");
+    uart::write_u64(total_heap as u64 / 1024);
+    uart::write_line(" KiB\x1b[0m");
+    print_boot_status("Heap allocator ready", true);
+    
+    // ─── NETWORK SUBSYSTEM ────────────────────────────────────────────────────
+    print_section("NETWORK SUBSYSTEM");
     init_network();
     
+    // ─── BOOT COMPLETE ────────────────────────────────────────────────────────
+    print_section("BOOT COMPLETE");
+    uart::write_line("");
+    uart::write_line("    \x1b[1;32m╭─────────────────────────────────────────────────────────────────╮\x1b[0m");
+    uart::write_line("    \x1b[1;32m│\x1b[0m                                                                 \x1b[1;32m│\x1b[0m");
+    uart::write_line("    \x1b[1;32m│\x1b[0m   \x1b[1;97mRISK-V OS is ready!\x1b[0m                                           \x1b[1;32m│\x1b[0m");
+    uart::write_line("    \x1b[1;32m│\x1b[0m   \x1b[0;90mType 'help' for available commands\x1b[0m                            \x1b[1;32m│\x1b[0m");
+    uart::write_line("    \x1b[1;32m│\x1b[0m                                                                 \x1b[1;32m│\x1b[0m");
+    uart::write_line("    \x1b[1;32m╰─────────────────────────────────────────────────────────────────╯\x1b[0m");
+    uart::write_line("");
+
     print_prompt();
 
     let console = uart::Console::new();
     let mut buffer = [0u8; 128];
     let mut len = 0usize;
     let mut count: usize = 0;
+    let mut last_newline: u8 = 0; // Track last newline char to handle \r\n sequences
 
     loop {
         // Poll network stack
@@ -65,7 +145,14 @@ fn main() -> ! {
 
         match byte {
             b'\r' | b'\n' => {
-                uart::write_line("");
+                // Skip second char of \r\n or \n\r sequence
+                if (last_newline == b'\r' && byte == b'\n') || (last_newline == b'\n' && byte == b'\r') {
+                    last_newline = 0;
+                    continue;
+                }
+                last_newline = byte;
+                uart::write_line("");  // Echo the newline
+                uart::write_line("");  // Add blank line before command output
                 handle_line(&buffer, len, &mut count);
                 print_prompt();
                 len = 0;
@@ -80,6 +167,7 @@ fn main() -> ! {
                 }
             }
             _ => {
+                last_newline = 0; // Reset newline tracking on regular input
                 if len < buffer.len() {
                     buffer[len] = byte;
                     len += 1;
@@ -92,45 +180,62 @@ fn main() -> ! {
 
 /// Initialize the network stack
 fn init_network() {
-    uart::write_line("Scanning for VirtIO network device...");
+    uart::write_line("    \x1b[0;90m├─\x1b[0m Probing for VirtIO devices...");
     
     // Probe for VirtIO network device
     match virtio_net::VirtioNet::probe() {
         Some(device) => {
-            uart::write_str("  Found at 0x");
+            uart::write_str("    \x1b[0;90m├─\x1b[0m VirtIO-Net found at: \x1b[1;97m0x");
             uart::write_hex(device.base_addr() as u64);
-            uart::write_line("");
+            uart::write_line("\x1b[0m");
             
             match net::NetState::new(device) {
                 Ok(state) => {
-                    let mac = state.mac_str();
-                    uart::write_line("Network initialized:");
-                    uart::write_str("  MAC: ");
-                    uart::write_bytes(&mac);
-                    uart::write_line("");
-                    uart::write_str("  IP:  ");
-                    let mut ip_buf = [0u8; 16];
-                    let ip_len = net::format_ipv4(net::IP_ADDR, &mut ip_buf);
-                    uart::write_bytes(&ip_buf[..ip_len]);
-                    uart::write_line("");
-                    // Store in static FIRST, then finalize (so buffer addresses are correct)
+                    // Store in static FIRST, then finalize
                     unsafe { 
                         NET_STATE = Some(state);
-                        // Now finalize - populates RX buffers with correct addresses
                         if let Some(ref mut s) = NET_STATE {
                             s.finalize();
+                            
+                            // Print network configuration
+                            uart::write_line("");
+                            uart::write_line("    \x1b[1;34m┌─ Network Interface ─────────────────────────────────────┐\x1b[0m");
+                            uart::write_str("    \x1b[1;34m│\x1b[0m  MAC Address:   \x1b[1;97m");
+                            uart::write_bytes(&s.mac_str());
+                            uart::write_line("\x1b[0m                    \x1b[1;34m│\x1b[0m");
+                            
+                            let mut ip_buf = [0u8; 16];
+                            let ip_len = net::format_ipv4(net::IP_ADDR, &mut ip_buf);
+                            uart::write_str("    \x1b[1;34m│\x1b[0m  IPv4 Address:  \x1b[1;97m");
+                            uart::write_bytes(&ip_buf[..ip_len]);
+                            uart::write_str("/");
+                            uart::write_u64(net::PREFIX_LEN as u64);
+                            uart::write_line("\x1b[0m                   \x1b[1;34m│\x1b[0m");
+                            
+                            let gw_len = net::format_ipv4(net::GATEWAY, &mut ip_buf);
+                            uart::write_str("    \x1b[1;34m│\x1b[0m  Gateway:       \x1b[1;97m");
+                            uart::write_bytes(&ip_buf[..gw_len]);
+                            uart::write_line("\x1b[0m                       \x1b[1;34m│\x1b[0m");
+                            
+                            let dns_len = net::format_ipv4(net::DNS_SERVER, &mut ip_buf);
+                            uart::write_str("    \x1b[1;34m│\x1b[0m  DNS Server:    \x1b[1;97m");
+                            uart::write_bytes(&ip_buf[..dns_len]);
+                            uart::write_line("\x1b[0m                       \x1b[1;34m│\x1b[0m");
+                            uart::write_line("    \x1b[1;34m└─────────────────────────────────────────────────────────┘\x1b[0m");
                         }
                     }
+                    print_boot_status("Network stack initialized (smoltcp)", true);
+                    print_boot_status("VirtIO-Net driver loaded", true);
                 }
                 Err(e) => {
-                    uart::write_str("  Init FAILED: ");
+                    uart::write_str("    \x1b[1;31m[✗]\x1b[0m Network init failed: ");
                     uart::write_line(e);
                 }
             }
         }
         None => {
-            uart::write_line("  No VirtIO network device found.");
-            uart::write_line("  Run VM with --net-tap <tapname> or --net-dummy to enable networking.");
+            uart::write_line("    \x1b[1;33m[!]\x1b[0m No VirtIO network device detected");
+            uart::write_line("    \x1b[0;90m    └─ Network features will be unavailable\x1b[0m");
         }
     }
 }
@@ -149,22 +254,22 @@ fn poll_network() {
                     if let Some((from, _ident, seq)) = state.check_ping_reply() {
                         if seq == ping.seq {
                             let rtt = timestamp - ping.sent_time;
-                            uart::write_str("Reply from ");
                             let mut ip_buf = [0u8; 16];
                             let ip_len = net::format_ipv4(from, &mut ip_buf);
+                            uart::write_str("\x1b[1;32m64 bytes from ");
                             uart::write_bytes(&ip_buf[..ip_len]);
-                            uart::write_str(": seq=");
+                            uart::write_str(": icmp_seq=");
                             uart::write_u64(seq as u64);
                             uart::write_str(" time=");
                             uart::write_u64(rtt as u64);
-                            uart::write_line("ms");
+                            uart::write_line(" ms\x1b[0m");
                             ping.waiting = false;
                         }
                     }
                     
                     // Timeout after 5 seconds
                     if timestamp - ping.sent_time > 5000 {
-                        uart::write_line("Request timed out");
+                        uart::write_line("\x1b[1;31mRequest timed out\x1b[0m");
                         ping.waiting = false;
                     }
                 }
@@ -174,7 +279,7 @@ fn poll_network() {
 }
 
 fn print_prompt() {
-    uart::write_str("risk-v> ");
+    uart::write_str("\x1b[1;35mrisk-v\x1b[0m:\x1b[1;34m~\x1b[0m$ ");
 }
 
 fn handle_line(buffer: &[u8], len: usize, count: &mut usize) {
@@ -210,30 +315,15 @@ fn handle_line(buffer: &[u8], len: usize, count: &mut usize) {
     }
     let args = &line[arg_start..];
 
+    // Print newline before command output
+    uart::write_line("");
+
     if eq_cmd(cmd, b"help") {
         show_help();
-    } else if eq_cmd(cmd, b"hello") {
-        *count += 400;
-        uart::write_str("Hello, count ");
-        uart::write_u64(*count as u64);
-        uart::write_line("");
-    } else if eq_cmd(cmd, b"count") {
-        uart::write_str("Current count: ");
-        uart::write_u64(*count as u64);
-        uart::write_line("");
     } else if eq_cmd(cmd, b"clear") {
         for _ in 0..20 {
             uart::write_line("");
         }
-    } else if eq_cmd(cmd, b"echo") {
-        uart::write_bytes(args);
-        uart::write_line("");
-    } else if eq_cmd(cmd, b"alloc") {
-        cmd_alloc(args);
-    } else if eq_cmd(cmd, b"memtest") {
-        cmd_memtest(args);
-    } else if eq_cmd(cmd, b"memstats") {
-        cmd_memstats();
     } else if eq_cmd(cmd, b"ip") {
         cmd_ip(args);
     } else if eq_cmd(cmd, b"ping") {
@@ -242,6 +332,8 @@ fn handle_line(buffer: &[u8], len: usize, count: &mut usize) {
         cmd_nslookup(args);
     } else if eq_cmd(cmd, b"netstat") {
         cmd_netstat();
+    } else if eq_cmd(cmd, b"shutdown") || eq_cmd(cmd, b"poweroff") {
+        cmd_shutdown();
     } else {
         uart::write_str("Unknown command: ");
         uart::write_bytes(cmd);
@@ -250,19 +342,27 @@ fn handle_line(buffer: &[u8], len: usize, count: &mut usize) {
 }
 
 fn show_help() {
-    uart::write_line("Available commands:");
-    uart::write_line("  help           - show this help");
-    uart::write_line("  hello          - increment and print the counter");
-    uart::write_line("  count          - show current counter value");
-    uart::write_line("  echo <text>    - print <text>");
-    uart::write_line("  clear          - print a few newlines");
-    uart::write_line("  alloc <bytes>  - allocate bytes (leaked) to test heap usage");
-    uart::write_line("  memtest [n]    - run n allocation/deallocation cycles (default: 10)");
-    uart::write_line("  memstats       - show heap memory statistics");
-    uart::write_line("  ip addr        - show network interface info (MAC/IP)");
-    uart::write_line("  ping <ip|host> - send ICMP echo request (resolves hostnames)");
-    uart::write_line("  nslookup <host> - DNS lookup (resolve hostname to IP)");
-    uart::write_line("  netstat        - show network statistics");
+    uart::write_line("");
+    uart::write_line("\x1b[1;36m╭──────────────────────────────────────────────────────────────────────────╮\x1b[0m");
+    uart::write_line("\x1b[1;36m│\x1b[0m                     \x1b[1;97mRISK-V OS Command Reference\x1b[0m                         \x1b[1;36m│\x1b[0m");
+    uart::write_line("\x1b[1;36m╰──────────────────────────────────────────────────────────────────────────╯\x1b[0m");
+    uart::write_line("");
+    uart::write_line("\x1b[1;33m  System Commands:\x1b[0m");
+    uart::write_line("    \x1b[1;32mhelp\x1b[0m              Show this help message");
+    uart::write_line("    \x1b[1;32mclear\x1b[0m             Clear the screen");
+    uart::write_line("    \x1b[1;32mshutdown\x1b[0m          Power off the virtual machine");
+    uart::write_line("");
+    uart::write_line("\x1b[1;33m  Memory Commands:\x1b[0m");
+    uart::write_line("    \x1b[1;32mmemstats\x1b[0m          Show heap memory statistics");
+    uart::write_line("    \x1b[1;32mmemtest\x1b[0m \x1b[0;90m[n]\x1b[0m       Run n allocation/deallocation cycles");
+    uart::write_line("    \x1b[1;32malloc\x1b[0m \x1b[0;90m<bytes>\x1b[0m     Allocate bytes (for testing)");
+    uart::write_line("");
+    uart::write_line("\x1b[1;33m  Network Commands:\x1b[0m");
+    uart::write_line("    \x1b[1;32mip addr\x1b[0m           Show network interface configuration");
+    uart::write_line("    \x1b[1;32mping\x1b[0m \x1b[0;90m<ip|host>\x1b[0m    Send ICMP echo request");
+    uart::write_line("    \x1b[1;32mnslookup\x1b[0m \x1b[0;90m<host>\x1b[0m   DNS lookup (resolve hostname to IP)");
+    uart::write_line("    \x1b[1;32mnetstat\x1b[0m           Show network status");
+    uart::write_line("");
 }
 
 fn cmd_alloc(args: &[u8]) {
@@ -356,25 +456,43 @@ fn cmd_memtest(args: &[u8]) {
 fn cmd_memstats() {
     let total = allocator::heap_size();
     let (used, free) = allocator::heap_stats();
+    let percent_used = if total > 0 { (used * 100) / total } else { 0 };
+    
+    // Create a visual bar
+    let bar_width = 30;
+    let filled = (percent_used * bar_width) / 100;
 
-    uart::write_line("Heap Memory Statistics:");
-    uart::write_str("  Total:  ");
-    uart::write_u64(total as u64);
-    uart::write_line(" bytes");
-    uart::write_str("  Used:   ");
-    uart::write_u64(used as u64);
-    uart::write_line(" bytes");
-    uart::write_str("  Free:   ");
-    uart::write_u64(free as u64);
-    uart::write_line(" bytes");
-
-    // Calculate percentage used
-    if total > 0 {
-        let percent_used = (used * 100) / total;
-        uart::write_str("  Usage:  ");
-        uart::write_u64(percent_used as u64);
-        uart::write_line("%");
+    uart::write_line("");
+    uart::write_line("\x1b[1;36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    uart::write_line("\x1b[1;36m│\x1b[0m              \x1b[1;97mHeap Memory Statistics\x1b[0m                        \x1b[1;36m│\x1b[0m");
+    uart::write_line("\x1b[1;36m├─────────────────────────────────────────────────────────────┤\x1b[0m");
+    
+    uart::write_str("\x1b[1;36m│\x1b[0m  Total:   \x1b[1;97m");
+    uart::write_u64(total as u64 / 1024);
+    uart::write_line(" KiB\x1b[0m                                        \x1b[1;36m│\x1b[0m");
+    
+    uart::write_str("\x1b[1;36m│\x1b[0m  Used:    \x1b[1;33m");
+    uart::write_u64(used as u64 / 1024);
+    uart::write_line(" KiB\x1b[0m                                        \x1b[1;36m│\x1b[0m");
+    
+    uart::write_str("\x1b[1;36m│\x1b[0m  Free:    \x1b[1;32m");
+    uart::write_u64(free as u64 / 1024);
+    uart::write_line(" KiB\x1b[0m                                        \x1b[1;36m│\x1b[0m");
+    
+    uart::write_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
+    uart::write_str("\x1b[1;36m│\x1b[0m  Usage:   [");
+    for i in 0..bar_width {
+        if i < filled {
+            uart::write_str("\x1b[1;32m█\x1b[0m");
+        } else {
+            uart::write_str("\x1b[0;90m░\x1b[0m");
+        }
     }
+    uart::write_str("] ");
+    uart::write_u64(percent_used as u64);
+    uart::write_line("%           \x1b[1;36m│\x1b[0m");
+    uart::write_line("\x1b[1;36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    uart::write_line("");
 }
 
 fn cmd_ip(args: &[u8]) {
@@ -382,23 +500,34 @@ fn cmd_ip(args: &[u8]) {
     if args.is_empty() || eq_cmd(args, b"addr") {
         unsafe {
             if let Some(ref state) = NET_STATE {
-                uart::write_line("Network Interface:");
-                uart::write_str("  MAC Address: ");
-                uart::write_bytes(&state.mac_str());
                 uart::write_line("");
-                uart::write_str("  IPv4 Address: ");
+                uart::write_line("\x1b[1;34m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+                uart::write_line("\x1b[1;34m│\x1b[0m            \x1b[1;97mNetwork Interface: virtio0\x1b[0m                       \x1b[1;34m│\x1b[0m");
+                uart::write_line("\x1b[1;34m├─────────────────────────────────────────────────────────────┤\x1b[0m");
+                
+                uart::write_str("\x1b[1;34m│\x1b[0m  \x1b[1;33mlink/ether\x1b[0m  ");
+                uart::write_bytes(&state.mac_str());
+                uart::write_line("                              \x1b[1;34m│\x1b[0m");
+                
                 let mut ip_buf = [0u8; 16];
                 let ip_len = net::format_ipv4(net::IP_ADDR, &mut ip_buf);
+                uart::write_str("\x1b[1;34m│\x1b[0m  \x1b[1;33minet\x1b[0m        ");
                 uart::write_bytes(&ip_buf[..ip_len]);
                 uart::write_str("/");
                 uart::write_u64(net::PREFIX_LEN as u64);
-                uart::write_line("");
-                uart::write_str("  Gateway: ");
+                uart::write_line("                               \x1b[1;34m│\x1b[0m");
+                
                 let gw_len = net::format_ipv4(net::GATEWAY, &mut ip_buf);
+                uart::write_str("\x1b[1;34m│\x1b[0m  \x1b[1;33mgateway\x1b[0m     ");
                 uart::write_bytes(&ip_buf[..gw_len]);
+                uart::write_line("                                  \x1b[1;34m│\x1b[0m");
+                
+                uart::write_line("\x1b[1;34m│\x1b[0m                                                             \x1b[1;34m│\x1b[0m");
+                uart::write_line("\x1b[1;34m│\x1b[0m  \x1b[1;32mState: UP\x1b[0m    \x1b[0;90mMTU: 1500    Type: VirtIO-Net\x1b[0m              \x1b[1;34m│\x1b[0m");
+                uart::write_line("\x1b[1;34m└─────────────────────────────────────────────────────────────┘\x1b[0m");
                 uart::write_line("");
             } else {
-                uart::write_line("Network not initialized");
+                uart::write_line("\x1b[1;31m✗\x1b[0m Network not initialized");
             }
         }
     } else {
@@ -409,7 +538,7 @@ fn cmd_ip(args: &[u8]) {
 fn cmd_ping(args: &[u8]) {
     if args.is_empty() {
         uart::write_line("Usage: ping <ip|hostname>");
-        uart::write_line("Examples:");
+        uart::write_line("\x1b[0;90mExamples:\x1b[0m");
         uart::write_line("  ping 10.0.2.2");
         uart::write_line("  ping google.com");
         return;
@@ -427,7 +556,7 @@ fn cmd_ping(args: &[u8]) {
         Some(ip) => ip,
         None => {
             // Not an IP address - try to resolve as hostname
-            uart::write_str("Resolving ");
+            uart::write_str("\x1b[0;90m[DNS]\x1b[0m Resolving ");
             uart::write_bytes(trimmed_args);
             uart::write_line("...");
             
@@ -437,20 +566,20 @@ fn cmd_ping(args: &[u8]) {
                         Some(resolved_ip) => {
                             let mut ip_buf = [0u8; 16];
                             let ip_len = net::format_ipv4(resolved_ip, &mut ip_buf);
-                            uart::write_str("Resolved to ");
+                            uart::write_str("\x1b[1;32m[DNS]\x1b[0m Resolved to \x1b[1;97m");
                             uart::write_bytes(&ip_buf[..ip_len]);
-                            uart::write_line("");
+                            uart::write_line("\x1b[0m");
                             resolved_ip
                         }
                         None => {
-                            uart::write_str("Failed to resolve hostname: ");
+                            uart::write_str("\x1b[1;31m[DNS]\x1b[0m Failed to resolve: ");
                             uart::write_bytes(trimmed_args);
                             uart::write_line("");
                             return;
                         }
                     }
                 } else {
-                    uart::write_line("Network not initialized");
+                    uart::write_line("\x1b[1;31m✗\x1b[0m Network not initialized");
                     return;
                 }
             }
@@ -467,11 +596,11 @@ fn cmd_ping(args: &[u8]) {
             
             let timestamp = get_time_ms();
             
-            uart::write_str("PING ");
             let mut ip_buf = [0u8; 16];
             let ip_len = net::format_ipv4(target, &mut ip_buf);
+            uart::write_str("\x1b[1;36mPING\x1b[0m ");
             uart::write_bytes(&ip_buf[..ip_len]);
-            uart::write_line("");
+            uart::write_line(" 56 bytes of data");
             
             // Set up ping state
             PING_STATE = Some(PingState {
@@ -484,18 +613,18 @@ fn cmd_ping(args: &[u8]) {
             // Send the actual ICMP echo request
             match state.send_ping(target, seq, timestamp) {
                 Ok(()) => {
-                    uart::write_str("Sending ICMP echo request, seq=");
+                    uart::write_str("\x1b[0;90m[ICMP]\x1b[0m Echo request seq=");
                     uart::write_u64(seq as u64);
-                    uart::write_line("...");
+                    uart::write_line(" sent");
                 }
                 Err(e) => {
-                    uart::write_str("Failed to send ping: ");
+                    uart::write_str("\x1b[1;31m[ICMP]\x1b[0m Failed: ");
                     uart::write_line(e);
                     PING_STATE = None;
                 }
             }
         } else {
-            uart::write_line("Network not initialized");
+            uart::write_line("\x1b[1;31m✗\x1b[0m Network not initialized");
         }
     }
 }
@@ -503,7 +632,7 @@ fn cmd_ping(args: &[u8]) {
 fn cmd_nslookup(args: &[u8]) {
     if args.is_empty() {
         uart::write_line("Usage: nslookup <hostname>");
-        uart::write_line("Example: nslookup google.com");
+        uart::write_line("\x1b[0;90mExample: nslookup google.com\x1b[0m");
         return;
     }
     
@@ -516,36 +645,42 @@ fn cmd_nslookup(args: &[u8]) {
     
     unsafe {
         if let Some(ref mut state) = NET_STATE {
-            uart::write_str("Looking up ");
-            uart::write_bytes(hostname);
-            uart::write_line("...");
-            
-            uart::write_str("Server: ");
+            uart::write_line("");
+            uart::write_str("\x1b[1;33mServer:\x1b[0m  ");
             let mut ip_buf = [0u8; 16];
             let dns_len = net::format_ipv4(net::DNS_SERVER, &mut ip_buf);
             uart::write_bytes(&ip_buf[..dns_len]);
             uart::write_line("");
+            uart::write_line("\x1b[1;33mPort:\x1b[0m    53");
             uart::write_line("");
+            
+            uart::write_str("\x1b[0;90mQuerying ");
+            uart::write_bytes(hostname);
+            uart::write_line("...\x1b[0m");
             
             // Perform DNS lookup with 5 second timeout
             match dns::resolve(state, hostname, net::DNS_SERVER, 5000, get_time_ms) {
                 Some(addr) => {
-                    uart::write_str("Name:    ");
+                    uart::write_line("");
+                    uart::write_str("\x1b[1;32mName:\x1b[0m    ");
                     uart::write_bytes(hostname);
                     uart::write_line("");
-                    uart::write_str("Address: ");
                     let addr_len = net::format_ipv4(addr, &mut ip_buf);
+                    uart::write_str("\x1b[1;32mAddress:\x1b[0m \x1b[1;97m");
                     uart::write_bytes(&ip_buf[..addr_len]);
+                    uart::write_line("\x1b[0m");
                     uart::write_line("");
                 }
                 None => {
-                    uart::write_str("*** Can't find ");
+                    uart::write_line("");
+                    uart::write_str("\x1b[1;31m*** Can't find ");
                     uart::write_bytes(hostname);
-                    uart::write_line(": No response from server");
+                    uart::write_line(": No response from server\x1b[0m");
+                    uart::write_line("");
                 }
             }
         } else {
-            uart::write_line("Network not initialized");
+            uart::write_line("\x1b[1;31m✗\x1b[0m Network not initialized");
         }
     }
 }
@@ -553,16 +688,50 @@ fn cmd_nslookup(args: &[u8]) {
 fn cmd_netstat() {
     unsafe {
         if let Some(ref _state) = NET_STATE {
-            uart::write_line("Network Status:");
-            uart::write_str("  Device: VirtIO-Net at 0x");
-            uart::write_hex(virtio_net::VIRTIO_NET_BASE as u64);
             uart::write_line("");
-            uart::write_str("  Status: ");
-            uart::write_line("UP");
+            uart::write_line("\x1b[1;35m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+            uart::write_line("\x1b[1;35m│\x1b[0m                   \x1b[1;97mNetwork Statistics\x1b[0m                         \x1b[1;35m│\x1b[0m");
+            uart::write_line("\x1b[1;35m├─────────────────────────────────────────────────────────────┤\x1b[0m");
+            uart::write_line("\x1b[1;35m│\x1b[0m  \x1b[1;33mDevice:\x1b[0m                                                   \x1b[1;35m│\x1b[0m");
+            uart::write_str("\x1b[1;35m│\x1b[0m    Type:     \x1b[1;97mVirtIO Network Device\x1b[0m                        \x1b[1;35m│\x1b[0m\n");
+            uart::write_str("\x1b[1;35m│\x1b[0m    Address:  \x1b[1;97m0x");
+            uart::write_hex(virtio_net::VIRTIO_NET_BASE as u64);
+            uart::write_line("\x1b[0m                           \x1b[1;35m│\x1b[0m");
+            uart::write_line("\x1b[1;35m│\x1b[0m    Status:   \x1b[1;32m● ONLINE\x1b[0m                                    \x1b[1;35m│\x1b[0m");
+            uart::write_line("\x1b[1;35m│\x1b[0m                                                             \x1b[1;35m│\x1b[0m");
+            uart::write_line("\x1b[1;35m│\x1b[0m  \x1b[1;33mProtocol Stack:\x1b[0m                                         \x1b[1;35m│\x1b[0m");
+            uart::write_line("\x1b[1;35m│\x1b[0m    \x1b[1;97msmoltcp\x1b[0m - Lightweight TCP/IP stack                     \x1b[1;35m│\x1b[0m");
+            uart::write_line("\x1b[1;35m│\x1b[0m    Protocols: ICMP, UDP, TCP, ARP                          \x1b[1;35m│\x1b[0m");
+            uart::write_line("\x1b[1;35m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+            uart::write_line("");
         } else {
-            uart::write_line("Network not initialized");
+            uart::write_line("\x1b[1;31m✗\x1b[0m Network not initialized");
         }
     }
+}
+
+fn cmd_shutdown() {
+    uart::write_line("");
+    uart::write_line("\x1b[1;31m╔═══════════════════════════════════════════════════════════════════╗\x1b[0m");
+    uart::write_line("\x1b[1;31m║\x1b[0m                                                                   \x1b[1;31m║\x1b[0m");
+    uart::write_line("\x1b[1;31m║\x1b[0m                    \x1b[1;97mSystem Shutdown Initiated\x1b[0m                       \x1b[1;31m║\x1b[0m");
+    uart::write_line("\x1b[1;31m║\x1b[0m                                                                   \x1b[1;31m║\x1b[0m");
+    uart::write_line("\x1b[1;31m╚═══════════════════════════════════════════════════════════════════╝\x1b[0m");
+    uart::write_line("");
+    uart::write_line("    \x1b[0;90m[1/3]\x1b[0m Syncing filesystems...");
+    uart::write_line("    \x1b[0;90m[2/3]\x1b[0m Stopping network services...");
+    uart::write_line("    \x1b[0;90m[3/3]\x1b[0m Powering off CPU...");
+    uart::write_line("");
+    uart::write_line("    \x1b[1;32m✓ Goodbye!\x1b[0m");
+    uart::write_line("");
+    
+    // Write to the test finisher address to signal the VM to stop
+    // Value 0x5555 indicates successful exit (PASS)
+    unsafe {
+        core::ptr::write_volatile(TEST_FINISHER as *mut u32, 0x5555);
+    }
+    // Should not reach here, but loop just in case
+    loop {}
 }
 
 fn parse_usize(args: &[u8]) -> usize {

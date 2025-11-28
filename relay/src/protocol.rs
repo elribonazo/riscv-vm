@@ -97,22 +97,6 @@ pub fn encode_data_frame(ethernet_frame: &[u8]) -> Vec<u8> {
     frame
 }
 
-/// Decode a data datagram, returning the Ethernet frame
-pub fn decode_data_frame(data: &[u8]) -> Result<&[u8], String> {
-    if data.is_empty() {
-        return Err("Empty message".to_string());
-    }
-    if data[0] != MSG_TYPE_DATA {
-        return Err(format!("Not a data message (type={})", data[0]));
-    }
-    Ok(&data[1..])
-}
-
-/// Check the message type of a datagram
-pub fn message_type(data: &[u8]) -> Option<u8> {
-    data.first().copied()
-}
-
 /// Helper to format MAC address for display
 pub fn format_mac(mac: &[u8; 6]) -> String {
     format!(

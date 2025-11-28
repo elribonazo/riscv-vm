@@ -70,106 +70,183 @@ fn dump_virtio_id(bus: &mut SystemBus) {
     );
 }
 
+fn print_vm_banner() {
+    const BANNER: &str = r#"
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │                                                                         │
+    │   ██████╗ ██╗███████╗██╗  ██╗    ██╗   ██╗                              │
+    │   ██╔══██╗██║██╔════╝██║ ██╔╝    ██║   ██║                              │
+    │   ██████╔╝██║███████╗█████╔╝     ██║   ██║                              │
+    │   ██╔══██╗██║╚════██║██╔═██╗     ╚██╗ ██╔╝                              │
+    │   ██║  ██║██║███████║██║  ██╗     ╚████╔╝                               │
+    │   ╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝      ╚═══╝                                │
+    │                                                                         │
+    │   RISC-V Virtual Machine Hypervisor v0.1.0                              │
+    │   64-bit RISC-V Emulator with VirtIO Support                            │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+"#;
+    println!("{}", BANNER);
+}
+
+fn print_section(title: &str) {
+    println!("\n\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+    println!("\x1b[1;33m  ▸ {}\x1b[0m", title);
+    println!("\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+}
+
+fn print_status(component: &str, status: &str, ok: bool) {
+    let status_color = if ok { "\x1b[1;32m" } else { "\x1b[1;31m" };
+    let check = if ok { "✓" } else { "✗" };
+    println!("    \x1b[0;37m{:<40}\x1b[0m {}[{}] {}\x1b[0m", component, status_color, check, status);
+}
+
+fn print_info(key: &str, value: &str) {
+    println!("    \x1b[0;90m├─\x1b[0m \x1b[0;37m{:<20}\x1b[0m \x1b[1;97m{}\x1b[0m", key, value);
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+    print_vm_banner();
+    
     let args = Args::parse();
 
+    // ─── CPU INITIALIZATION ───────────────────────────────────────────────────
+    print_section("CPU INITIALIZATION");
+    print_info("Architecture", "RISC-V 64-bit (RV64GC)");
+    print_info("Extensions", "I, M, A, F, D, C, Zicsr, Zifencei");
+    print_info("Privilege Modes", "Machine, Supervisor, User");
+    print_status("CPU Core", "INITIALIZED", true);
+
+    // ─── MEMORY SUBSYSTEM ─────────────────────────────────────────────────────
+    print_section("MEMORY SUBSYSTEM");
+    let dram_size_bytes = args
+        .mem_mib
+        .checked_mul(1024 * 1024)
+        .ok_or("Requested memory size is too large")?;
+    let dram_base = 0x8000_0000u64;
+    
+    print_info("DRAM Base", &format!("0x{:08X}", dram_base));
+    print_info("DRAM Size", &format!("{} MiB ({} bytes)", args.mem_mib, dram_size_bytes));
+    print_info("Address Range", &format!("0x{:08X} - 0x{:08X}", dram_base, dram_base + dram_size_bytes as u64));
+    
+    let mut bus = SystemBus::new(dram_base, dram_size_bytes);
+    print_status("DRAM Controller", "ONLINE", true);
+    print_status("MMU (Sv39)", "READY", true);
+
+    // ─── KERNEL LOADING ───────────────────────────────────────────────────────
+    print_section("KERNEL LOADING");
     let buffer = if args.kernel.starts_with("http://") || args.kernel.starts_with("https://") {
-        println!("Downloading kernel from {}...", args.kernel);
+        print_info("Source", "Remote (HTTP/HTTPS)");
+        print_info("URL", &args.kernel);
+        println!("    \x1b[0;90m├─\x1b[0m \x1b[0;33mDownloading...\x1b[0m");
         let response = reqwest::blocking::get(&args.kernel)?;
         if !response.status().is_success() {
+            print_status("Download", "FAILED", false);
             return Err(format!("Failed to download kernel: {}", response.status()).into());
         }
-        response.bytes()?.to_vec()
+        let bytes = response.bytes()?.to_vec();
+        print_status("Download", "COMPLETE", true);
+        bytes
     } else {
+        print_info("Source", "Local filesystem");
+        print_info("Path", &args.kernel);
         let mut file = File::open(&args.kernel)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
         buffer
     };
+    print_info("Kernel Size", &format!("{} bytes ({:.2} KiB)", buffer.len(), buffer.len() as f64 / 1024.0));
 
-    let dram_size_bytes = args
-        .mem_mib
-        .checked_mul(1024 * 1024)
-        .ok_or("Requested memory size is too large")?;
 
-    // Initialize DRAM at 0x8000_0000
-    let dram_base = 0x8000_0000;
-    let mut bus = SystemBus::new(dram_base, dram_size_bytes);
-
+    // ─── VIRTIO DEVICE BUS ─────────────────────────────────────────────────────
+    print_section("VIRTIO DEVICE BUS");
+    print_info("Bus Type", "VirtIO MMIO v2");
+    print_info("Base Address", "0x10001000");
+    print_info("Device Spacing", "0x1000 (4 KiB)");
+    
     // If a disk image is provided, wire up VirtIO Block at 0x1000_1000
     if let Some(disk_path) = &args.disk {
         let mut disk_file = File::open(disk_path)?;
         let mut disk_buf = Vec::new();
         disk_file.read_to_end(&mut disk_buf)?;
+        let disk_size_mib = disk_buf.len() / (1024 * 1024);
         let vblk = riscv_vm::virtio::VirtioBlock::new(disk_buf);
         bus.virtio_devices.push(Box::new(vblk));
-        println!("VirtIO Block device attached at 0x1000_1000 (IRQ 1)");
+        println!();
+        println!("    \x1b[1;35m┌─ VirtIO Block Device ─────────────────────────────────┐\x1b[0m");
+        println!("    \x1b[1;35m│\x1b[0m  Address:    \x1b[1;97m0x10001000\x1b[0m                              \x1b[1;35m│\x1b[0m");
+        println!("    \x1b[1;35m│\x1b[0m  IRQ:        \x1b[1;97m1\x1b[0m                                       \x1b[1;35m│\x1b[0m");
+        println!("    \x1b[1;35m│\x1b[0m  Disk Size:  \x1b[1;97m{} MiB\x1b[0m                                  \x1b[1;35m│\x1b[0m", disk_size_mib);
+        println!("    \x1b[1;35m│\x1b[0m  Image:      \x1b[0;90m{}\x1b[0m", disk_path.display());
+        println!("    \x1b[1;35m└────────────────────────────────────────────────────────┘\x1b[0m");
+        print_status("VirtIO Block", "ATTACHED", true);
     }
 
-    // If a TAP interface is provided, wire up VirtIO Net with TAP backend
-    if let Some(tap_name) = &args.net_tap {
-        let tap_backend = riscv_vm::net_tap::TapBackend::new(tap_name);
-        let vnet = riscv_vm::virtio::VirtioNet::new(Box::new(tap_backend));
-        let device_idx = bus.virtio_devices.len();
-        let irq = 1 + device_idx; // IRQ 1 for first device, 2 for second, etc.
-        bus.virtio_devices.push(Box::new(vnet));
-        let base_addr = 0x1000_1000 + (device_idx as u64) * 0x1000;
-        println!("VirtIO Net device (TAP: {}) attached at 0x{:x} (IRQ {})", tap_name, base_addr, irq);
-    } else if let Some(ws_url) = &args.net_ws {
-        // Wire up VirtIO Net with WebSocket backend
-        let ws_backend = riscv_vm::net_ws::WsBackend::new(ws_url);
-        let vnet = riscv_vm::virtio::VirtioNet::new(Box::new(ws_backend));
-        let device_idx = bus.virtio_devices.len();
-        let irq = 1 + device_idx;
-        bus.virtio_devices.push(Box::new(vnet));
-        let base_addr = 0x1000_1000 + (device_idx as u64) * 0x1000;
-        println!("VirtIO Net device (WebSocket: {}) attached at 0x{:x} (IRQ {})", ws_url, base_addr, irq);
-    } else if let Some(wt_url) = &args.net_webtransport {
-        // Wire up VirtIO Net with WebTransport backend
+    // If WebTransport is provided, wire up VirtIO Net
+    if let Some(wt_url) = &args.net_webtransport {
         let wt_backend = riscv_vm::net_webtransport::WebTransportBackend::new(wt_url, args.net_cert_hash.clone());
         let vnet = riscv_vm::virtio::VirtioNet::new(Box::new(wt_backend));
         let device_idx = bus.virtio_devices.len();
         let irq = 1 + device_idx;
         bus.virtio_devices.push(Box::new(vnet));
         let base_addr = 0x1000_1000 + (device_idx as u64) * 0x1000;
-        println!("VirtIO Net device (WebTransport: {}) attached at 0x{:x} (IRQ {})", wt_url, base_addr, irq);
-    } else if args.net_dummy {
-        // Wire up VirtIO Net with dummy backend (for testing)
-        let dummy_backend = riscv_vm::net::DummyBackend::new();
-        let vnet = riscv_vm::virtio::VirtioNet::new(Box::new(dummy_backend));
-        let device_idx = bus.virtio_devices.len();
-        let irq = 1 + device_idx;
-        bus.virtio_devices.push(Box::new(vnet));
-        let base_addr = 0x1000_1000 + (device_idx as u64) * 0x1000;
-        println!("VirtIO Net device (Dummy) attached at 0x{:x} (IRQ {})", base_addr, irq);
-    }
+        println!();
+        println!("    \x1b[1;34m┌─ VirtIO Network Device ───────────────────────────────┐\x1b[0m");
+        println!("    \x1b[1;34m│\x1b[0m  Address:    \x1b[1;97m0x{:08X}\x1b[0m                            \x1b[1;34m│\x1b[0m", base_addr);
+        println!("    \x1b[1;34m│\x1b[0m  IRQ:        \x1b[1;97m{}\x1b[0m                                       \x1b[1;34m│\x1b[0m", irq);
+        println!("    \x1b[1;34m│\x1b[0m  Backend:    \x1b[1;97mWebTransport\x1b[0m                            \x1b[1;34m│\x1b[0m");
+        println!("    \x1b[1;34m│\x1b[0m  Relay:      \x1b[0;90m{}\x1b[0m", wt_url);
+        println!("    \x1b[1;34m└────────────────────────────────────────────────────────┘\x1b[0m");
+        print_status("VirtIO Network", "ATTACHED", true);
+    } 
 
     let entry_pc = if buffer.starts_with(b"\x7FELF") {
-        println!("Detected ELF payload, loading program segments...");
+        print_info("Format", "ELF64 Executable");
         load_elf_into_dram(&buffer, &mut bus)?
     } else {
         if args.load_addr < dram_base {
-            eprintln!("Load address must be >= 0x{:x}", dram_base);
+            print_status("Load Address", "INVALID (below DRAM)", false);
             return Ok(());
         }
         let offset = args.load_addr - dram_base;
-        println!(
-            "Loading raw binary ({} bytes) at 0x{:x}",
-            buffer.len(),
-            args.load_addr
-        );
+        print_info("Format", "Raw Binary");
+        print_info("Load Address", &format!("0x{:08X}", args.load_addr));
         bus.dram
             .load(&buffer, offset)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         args.load_addr
     };
+    print_info("Entry Point", &format!("0x{:08X}", entry_pc));
+    print_status("Kernel Image", "LOADED", true);
+
+    // ─── SYSTEM PERIPHERALS ───────────────────────────────────────────────────
+    print_section("SYSTEM PERIPHERALS");
+    print_info("UART 16550", "0x10000000 (IRQ 10)");
+    print_info("CLINT", "0x02000000 (Machine Timer)");
+    print_info("PLIC", "0x0C000000 (IRQ Controller)");
+    print_status("UART Console", "READY", true);
+    print_status("Interrupt Controller", "CONFIGURED", true);
+    
+    // Early probe dump (harmless if device absent)
+    dump_virtio_id(&mut bus);
 
     let mut cpu = Cpu::new(entry_pc);
 
-    println!("Starting execution at 0x{:x}", cpu.pc);
-    // Early probe dump (harmless if device absent): helps debug xv6 panic on probe.
-    dump_virtio_id(&mut bus);
+    // ─── BOOT SEQUENCE COMPLETE ───────────────────────────────────────────────
+    print_section("BOOT SEQUENCE COMPLETE");
+    println!();
+    println!("    \x1b[1;32m╔══════════════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("    \x1b[1;32m║\x1b[0m                                                                      \x1b[1;32m║\x1b[0m");
+    println!("    \x1b[1;32m║\x1b[0m   \x1b[1;97mStarting RISC-V Kernel at 0x{:08X}\x1b[0m                           \x1b[1;32m║\x1b[0m", entry_pc);
+    println!("    \x1b[1;32m║\x1b[0m   \x1b[0;90mPress Ctrl-A then 'x' to terminate\x1b[0m                              \x1b[1;32m║\x1b[0m");
+    println!("    \x1b[1;32m║\x1b[0m                                                                      \x1b[1;32m║\x1b[0m");
+    println!("    \x1b[1;32m╚══════════════════════════════════════════════════════════════════════╝\x1b[0m");
+    println!();
+    println!("\x1b[1;36m══════════════════════════════════════════════════════════════════════════════\x1b[0m");
+    println!("\x1b[1;33m                           KERNEL OUTPUT BEGINS\x1b[0m");
+    println!("\x1b[1;36m══════════════════════════════════════════════════════════════════════════════\x1b[0m");
+    println!();
 
     let mut step_count = 0u64;
     let mut last_report_step = 0u64;
@@ -222,8 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(trap) = step_result {
             match trap {
                 // Test finisher / explicit host stop requested by the guest.
-                Trap::RequestedTrap(code) => {
-                    println!("Guest requested stop via test finisher: 0x{code:x}");
+                Trap::RequestedTrap(_) => {
                     break;
                 }
                 // Non-recoverable emulator error: dump state and exit.

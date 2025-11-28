@@ -8,7 +8,6 @@ pub mod clint;
 pub mod plic;
 pub mod uart;
 pub mod net;
-pub mod net_ws;
 pub mod net_webtransport;
 pub mod virtio;
 pub mod emulator;
@@ -16,8 +15,6 @@ pub mod emulator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod console;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub mod net_tap;
 
 use serde::{Deserialize, Serialize};
 
@@ -89,24 +86,6 @@ impl WasmVm {
     pub fn load_disk(&mut self, disk_image: &[u8]) {
         let vblk = virtio::VirtioBlock::new(disk_image.to_vec());
         self.bus.virtio_devices.push(Box::new(vblk));
-    }
-
-    /// Connect to a WebSocket relay server for networking.
-    /// The URL should be like "ws://localhost:8765".
-    pub fn connect_network(&mut self, ws_url: &str) -> Result<(), JsValue> {
-        use crate::net_ws::WsBackend;
-        use crate::virtio::VirtioNet;
-        
-        self.net_status = NetworkStatus::Connecting;
-        
-        let backend = WsBackend::new(ws_url);
-        let mut vnet = VirtioNet::new(Box::new(backend));
-        vnet.debug = false; // Set to true for debugging
-        
-        self.bus.virtio_devices.push(Box::new(vnet));
-        self.net_status = NetworkStatus::Connected;
-        
-        Ok(())
     }
     
     /// Connect to a WebTransport relay server.

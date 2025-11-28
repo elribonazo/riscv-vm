@@ -26,15 +26,6 @@ pub enum PeerMessage {
     Disconnect,
 }
 
-/// Frame to be routed by the hub
-#[derive(Debug)]
-pub struct RoutedFrame {
-    /// Source peer ID
-    pub from_peer: PeerId,
-    /// Raw datagram (with type prefix)
-    pub data: Vec<u8>,
-}
-
 /// The central hub that manages all peer connections and routing
 pub struct Hub {
     /// Peer manager (shared state)
@@ -335,12 +326,6 @@ impl Hub {
         for id in expired {
             senders.remove(&id);
         }
-    }
-
-    /// Get current peer count
-    pub async fn peer_count(&self) -> usize {
-        let peers = self.peers.read().await;
-        peers.peer_count()
     }
 
     /// Log hub statistics

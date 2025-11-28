@@ -7,9 +7,7 @@ pub const UART_SIZE: u64 = 0x100;
 // Registers (offset)
 const RBR: u64 = 0x00; // Receiver Buffer (Read)
 const THR: u64 = 0x00; // Transmitter Holding (Write)
-const DLL: u64 = 0x00; // Divisor Latch LSB (Read/Write if DLAB=1)
 const IER: u64 = 0x01; // Interrupt Enable
-const DLM: u64 = 0x01; // Divisor Latch MSB (Read/Write if DLAB=1)
 const IIR: u64 = 0x02; // Interrupt Identity (Read)
 const FCR: u64 = 0x02; // FIFO Control (Write)
 const LCR: u64 = 0x03; // Line Control
