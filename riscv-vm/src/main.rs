@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ─── CPU INITIALIZATION ───────────────────────────────────────────────────
     print_section("CPU INITIALIZATION");
-    print_info("Architecture", "RISC-V 64-bit (RV64GC)");
+    print_info("Architecture", "RISC-V 64-bit");
     print_info("Extensions", "I, M, A, F, D, C, Zicsr, Zifencei");
     print_info("Privilege Modes", "Machine, Supervisor, User");
     print_status("CPU Core", "INITIALIZED", true);
