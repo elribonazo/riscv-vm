@@ -11,6 +11,9 @@
 [Web Demo](https://linux.jribo.kiwi) • [Documentation](#documentation) • [Components](#components)
 
 </div>
+<div style="width:100%">
+<img width="917" height="943" alt="Screenshot 2025-11-28 at 21 49 31" src="https://github.com/user-attachments/assets/9143c834-5f6d-453e-bf4b-065dc64fb854" style="margin:0 auto;" />
+</div>
 
 ---
 
