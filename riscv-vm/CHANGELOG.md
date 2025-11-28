@@ -1,3 +1,13 @@
+## 0.0.7 (2025-11-28)
+
+### 🩹 Fixes
+
+- release package Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([c56a0df](https://github.com/elribonazo/riscv-vm/commit/c56a0df))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.6 (2025-11-28)
 
 ### 🩹 Fixes
