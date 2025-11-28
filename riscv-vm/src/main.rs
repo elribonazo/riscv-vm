@@ -21,7 +21,7 @@ struct Args {
     #[arg(long, default_value_t = 0x8000_0000)]
     load_addr: u64,
 
-    /// DRAM size in MiB
+    /// RAM size in MiB
     #[arg(long, default_value_t = 512)]
     mem_mib: usize,
 
@@ -126,12 +126,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Requested memory size is too large")?;
     let dram_base = 0x8000_0000u64;
     
-    print_info("DRAM Base", &format!("0x{:08X}", dram_base));
-    print_info("DRAM Size", &format!("{} MiB ({} bytes)", args.mem_mib, dram_size_bytes));
+    print_info("RAM Base", &format!("0x{:08X}", dram_base));
+    print_info("RAM Size", &format!("{} MiB ({} bytes)", args.mem_mib, dram_size_bytes));
     print_info("Address Range", &format!("0x{:08X} - 0x{:08X}", dram_base, dram_base + dram_size_bytes as u64));
     
     let mut bus = SystemBus::new(dram_base, dram_size_bytes);
-    print_status("DRAM Controller", "ONLINE", true);
+    print_status("RAM Controller", "ONLINE", true);
     print_status("MMU (Sv39)", "READY", true);
 
     // ─── KERNEL LOADING ───────────────────────────────────────────────────────
@@ -206,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         load_elf_into_dram(&buffer, &mut bus)?
     } else {
         if args.load_addr < dram_base {
-            print_status("Load Address", "INVALID (below DRAM)", false);
+            print_status("Load Address", "INVALID (below RAM)", false);
             return Ok(());
         }
         let offset = args.load_addr - dram_base;
@@ -408,7 +408,7 @@ fn load_elf_into_dram(
         };
         if target_addr < base {
             return Err(format!(
-                "Segment start 0x{:x} lies below DRAM base 0x{:x}",
+                "Segment start 0x{:x} lies below RAM base 0x{:x}",
                 target_addr, base
             )
             .into());
@@ -418,7 +418,7 @@ fn load_elf_into_dram(
             .ok_or_else(|| "Segment end overflow".to_string())?;
         if seg_end > dram_end {
             return Err(format!(
-                "Segment 0x{:x}-0x{:x} exceeds DRAM (end 0x{:x})",
+                "Segment 0x{:x}-0x{:x} exceeds RAM (end 0x{:x})",
                 target_addr, seg_end, dram_end
             )
             .into());
