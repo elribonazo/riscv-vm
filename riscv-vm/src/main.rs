@@ -86,23 +86,23 @@ fn print_vm_banner() {
     │                                                                         │
     └─────────────────────────────────────────────────────────────────────────┘
 "#;
-    println!("{}", BANNER);
+    eprintln!("{}", BANNER);
 }
 
 fn print_section(title: &str) {
-    println!("\n\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
-    println!("\x1b[1;33m  ▸ {}\x1b[0m", title);
-    println!("\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+    eprintln!("\n\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+    eprintln!("\x1b[1;33m  ▸ {}\x1b[0m", title);
+    eprintln!("\x1b[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
 }
 
 fn print_status(component: &str, status: &str, ok: bool) {
     let status_color = if ok { "\x1b[1;32m" } else { "\x1b[1;31m" };
     let check = if ok { "✓" } else { "✗" };
-    println!("    \x1b[0;37m{:<40}\x1b[0m {}[{}] {}\x1b[0m", component, status_color, check, status);
+    eprintln!("    \x1b[0;37m{:<40}\x1b[0m {}[{}] {}\x1b[0m", component, status_color, check, status);
 }
 
 fn print_info(key: &str, value: &str) {
-    println!("    \x1b[0;90m├─\x1b[0m \x1b[0;37m{:<20}\x1b[0m \x1b[1;97m{}\x1b[0m", key, value);
+    eprintln!("    \x1b[0;90m├─\x1b[0m \x1b[0;37m{:<20}\x1b[0m \x1b[1;97m{}\x1b[0m", key, value);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let buffer = if args.kernel.starts_with("http://") || args.kernel.starts_with("https://") {
         print_info("Source", "Remote (HTTP/HTTPS)");
         print_info("URL", &args.kernel);
-        println!("    \x1b[0;90m├─\x1b[0m \x1b[0;33mDownloading...\x1b[0m");
+        eprintln!("    \x1b[0;90m├─\x1b[0m \x1b[0;33mDownloading...\x1b[0m");
         let response = reqwest::blocking::get(&args.kernel)?;
         if !response.status().is_success() {
             print_status("Download", "FAILED", false);
@@ -173,13 +173,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let disk_size_mib = disk_buf.len() / (1024 * 1024);
         let vblk = riscv_vm::virtio::VirtioBlock::new(disk_buf);
         bus.virtio_devices.push(Box::new(vblk));
-        println!();
-        println!("    \x1b[1;35m┌─ VirtIO Block Device ─────────────────────────────────┐\x1b[0m");
-        println!("    \x1b[1;35m│\x1b[0m  Address:    \x1b[1;97m0x10001000\x1b[0m                              \x1b[1;35m│\x1b[0m");
-        println!("    \x1b[1;35m│\x1b[0m  IRQ:        \x1b[1;97m1\x1b[0m                                       \x1b[1;35m│\x1b[0m");
-        println!("    \x1b[1;35m│\x1b[0m  Disk Size:  \x1b[1;97m{} MiB\x1b[0m                                  \x1b[1;35m│\x1b[0m", disk_size_mib);
-        println!("    \x1b[1;35m│\x1b[0m  Image:      \x1b[0;90m{}\x1b[0m", disk_path.display());
-        println!("    \x1b[1;35m└────────────────────────────────────────────────────────┘\x1b[0m");
+        eprintln!();
+        eprintln!("    \x1b[1;35m┌─ VirtIO Block Device ─────────────────────────────────┐\x1b[0m");
+        eprintln!("    \x1b[1;35m│\x1b[0m  Address:    \x1b[1;97m0x10001000\x1b[0m                              \x1b[1;35m│\x1b[0m");
+        eprintln!("    \x1b[1;35m│\x1b[0m  IRQ:        \x1b[1;97m1\x1b[0m                                       \x1b[1;35m│\x1b[0m");
+        eprintln!("    \x1b[1;35m│\x1b[0m  Disk Size:  \x1b[1;97m{} MiB\x1b[0m                                  \x1b[1;35m│\x1b[0m", disk_size_mib);
+        eprintln!("    \x1b[1;35m│\x1b[0m  Image:      \x1b[0;90m{}\x1b[0m", disk_path.display());
+        eprintln!("    \x1b[1;35m└────────────────────────────────────────────────────────┘\x1b[0m");
         print_status("VirtIO Block", "ATTACHED", true);
     }
 
@@ -191,13 +191,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let irq = 1 + device_idx;
         bus.virtio_devices.push(Box::new(vnet));
         let base_addr = 0x1000_1000 + (device_idx as u64) * 0x1000;
-        println!();
-        println!("    \x1b[1;34m┌─ VirtIO Network Device ───────────────────────────────┐\x1b[0m");
-        println!("    \x1b[1;34m│\x1b[0m  Address:    \x1b[1;97m0x{:08X}\x1b[0m                            \x1b[1;34m│\x1b[0m", base_addr);
-        println!("    \x1b[1;34m│\x1b[0m  IRQ:        \x1b[1;97m{}\x1b[0m                                       \x1b[1;34m│\x1b[0m", irq);
-        println!("    \x1b[1;34m│\x1b[0m  Backend:    \x1b[1;97mWebTransport\x1b[0m                            \x1b[1;34m│\x1b[0m");
-        println!("    \x1b[1;34m│\x1b[0m  Relay:      \x1b[0;90m{}\x1b[0m", wt_url);
-        println!("    \x1b[1;34m└────────────────────────────────────────────────────────┘\x1b[0m");
+        eprintln!();
+        eprintln!("    \x1b[1;34m┌─ VirtIO Network Device ───────────────────────────────┐\x1b[0m");
+        eprintln!("    \x1b[1;34m│\x1b[0m  Address:    \x1b[1;97m0x{:08X}\x1b[0m                            \x1b[1;34m│\x1b[0m", base_addr);
+        eprintln!("    \x1b[1;34m│\x1b[0m  IRQ:        \x1b[1;97m{}\x1b[0m                                       \x1b[1;34m│\x1b[0m", irq);
+        eprintln!("    \x1b[1;34m│\x1b[0m  Backend:    \x1b[1;97mWebTransport\x1b[0m                            \x1b[1;34m│\x1b[0m");
+        eprintln!("    \x1b[1;34m│\x1b[0m  Relay:      \x1b[0;90m{}\x1b[0m", wt_url);
+        eprintln!("    \x1b[1;34m└────────────────────────────────────────────────────────┘\x1b[0m");
         print_status("VirtIO Network", "ATTACHED", true);
     } 
 
@@ -235,19 +235,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ─── BOOT SEQUENCE COMPLETE ───────────────────────────────────────────────
     print_section("BOOT SEQUENCE COMPLETE");
-    println!();
-    println!("    \x1b[1;32m╔══════════════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("    \x1b[1;32m║\x1b[0m                                                                      \x1b[1;32m║\x1b[0m");
-    println!("    \x1b[1;32m║\x1b[0m   \x1b[1;97mStarting RISC-V Kernel at 0x{:08X}\x1b[0m                           \x1b[1;32m║\x1b[0m", entry_pc);
-    println!("    \x1b[1;32m║\x1b[0m   \x1b[0;90mPress Ctrl-A then 'x' to terminate\x1b[0m                              \x1b[1;32m║\x1b[0m");
-    println!("    \x1b[1;32m║\x1b[0m                                                                      \x1b[1;32m║\x1b[0m");
-    println!("    \x1b[1;32m╚══════════════════════════════════════════════════════════════════════╝\x1b[0m");
-    println!();
-    println!("\x1b[1;36m══════════════════════════════════════════════════════════════════════════════\x1b[0m");
-    println!("\x1b[1;33m                           KERNEL OUTPUT BEGINS\x1b[0m");
-    println!("\x1b[1;36m══════════════════════════════════════════════════════════════════════════════\x1b[0m");
-    println!();
-    println!();
+    eprintln!();
+    eprintln!("    \x1b[1;32m╔══════════════════════════════════════════════════════════════════════╗\x1b[0m");
+    eprintln!("    \x1b[1;32m║\x1b[0m                                                                      \x1b[1;32m║\x1b[0m");
+    eprintln!("    \x1b[1;32m║\x1b[0m   \x1b[1;97mStarting RISC-V Kernel at 0x{:08X}\x1b[0m                           \x1b[1;32m║\x1b[0m", entry_pc);
+    eprintln!("    \x1b[1;32m║\x1b[0m   \x1b[0;90mPress Ctrl-A then 'x' to terminate\x1b[0m                              \x1b[1;32m║\x1b[0m");
+    eprintln!("    \x1b[1;32m║\x1b[0m                                                                      \x1b[1;32m║\x1b[0m");
+    eprintln!("    \x1b[1;32m╚══════════════════════════════════════════════════════════════════════╝\x1b[0m");
+    eprintln!();
+    eprintln!();
 
     let mut step_count = 0u64;
     let mut last_report_step = 0u64;
@@ -261,7 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(b) = console.poll() {
             if escaped {
                 if b == b'x' {
-                    println!("\nTerminated by user.");
+                    eprintln!("\nTerminated by user.");
                     break;
                 } else if b == 1 {
                     // Ctrl-A twice -> send Ctrl-A to guest
@@ -306,14 +302,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Non-recoverable emulator error: dump state and exit.
                 Trap::Fatal(msg) => {
                     eprintln!("Fatal emulator error: {msg}");
-                    println!("PC: 0x{:x}", cpu.pc);
+                    eprintln!("PC: 0x{:x}", cpu.pc);
                     for i in 0..32 {
                         if i % 4 == 0 {
-                            println!();
+                            eprintln!();
                         }
-                        print!("x{:<2}: 0x{:<16x} ", i, cpu.regs[i]);
+                        eprint!("x{:<2}: 0x{:<16x} ", i, cpu.regs[i]);
                     }
-                    println!();
+                    eprintln!();
                     break;
                 }
                 // Architectural traps (interrupts, page faults, ecalls, etc.)
@@ -366,8 +362,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let scause = cpu.read_csr(CSR_SCAUSE).unwrap_or(0);
             let stval = cpu.read_csr(CSR_STVAL).unwrap_or(0);
             let stvec = cpu.read_csr(CSR_STVEC).unwrap_or(0);
-            println!("PC reached 0, stopping.");
-            println!(
+            eprintln!("PC reached 0, stopping.");
+            eprintln!(
                 "Final state:\n  pc=0x{:016x} mode={:?}\n  M: mepc=0x{:016x} mcause=0x{:016x} mtval=0x{:016x} mtvec=0x{:016x}\n  S: sepc=0x{:016x} scause=0x{:016x} stval=0x{:016x} stvec=0x{:016x}",
                 cpu.pc, cpu.mode, mepc, mcause, mtval, mtvec, sepc, scause, stval, stvec
             );
