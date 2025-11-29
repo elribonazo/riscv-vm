@@ -19,16 +19,70 @@ const TEST_FINISHER: usize = 0x0010_0000;
 static mut NET_STATE: Option<net::NetState> = None;
 static mut FS_STATE: Option<fs::FileSystem> = None;
 
+/// State for continuous ping (like Linux ping command)
 struct PingState {
-    #[allow(dead_code)]
     target: smoltcp::wire::Ipv4Address,
     seq: u16,
-    sent_time: i64,
-    waiting: bool,
+    sent_time: i64,           // Time when current ping was sent
+    last_send_time: i64,      // Time when we last sent a ping (for 1s interval)
+    waiting: bool,            // Waiting for reply to current ping
+    continuous: bool,         // Whether running in continuous mode
+    // Statistics
+    packets_sent: u32,
+    packets_received: u32,
+    min_rtt: i64,
+    max_rtt: i64,
+    total_rtt: i64,
+}
+
+impl PingState {
+    fn new(target: smoltcp::wire::Ipv4Address, timestamp: i64) -> Self {
+        PingState {
+            target,
+            seq: 0,
+            sent_time: timestamp,
+            last_send_time: 0,
+            waiting: false,
+            continuous: true,
+            packets_sent: 0,
+            packets_received: 0,
+            min_rtt: i64::MAX,
+            max_rtt: 0,
+            total_rtt: 0,
+        }
+    }
+    
+    fn record_reply(&mut self, rtt: i64) {
+        self.packets_received += 1;
+        self.total_rtt += rtt;
+        if rtt < self.min_rtt {
+            self.min_rtt = rtt;
+        }
+        if rtt > self.max_rtt {
+            self.max_rtt = rtt;
+        }
+    }
+    
+    fn avg_rtt(&self) -> i64 {
+        if self.packets_received > 0 {
+            self.total_rtt / self.packets_received as i64
+        } else {
+            0
+        }
+    }
+    
+    fn packet_loss_percent(&self) -> u32 {
+        if self.packets_sent > 0 {
+            ((self.packets_sent - self.packets_received) * 100) / self.packets_sent
+        } else {
+            0
+        }
+    }
 }
 
 static mut BLK_DEV: Option<virtio_blk::VirtioBlock> = None;
 static mut PING_STATE: Option<PingState> = None;
+static mut COMMAND_RUNNING: bool = false;
 
 // ─── OUTPUT CAPTURE FOR REDIRECTION ────────────────────────────────────────────
 const OUTPUT_BUFFER_SIZE: usize = 4096;
@@ -287,6 +341,18 @@ fn main() -> ! {
             continue;
         }
         
+        // Check for Ctrl+C (0x03) to cancel running commands
+        if byte == 0x03 {
+            if cancel_running_command() {
+                // Command was cancelled, print new prompt
+                print_prompt();
+                len = 0;
+                browsing_history = false;
+                history_pos = 0;
+            }
+            continue;
+        }
+        
         // Handle escape sequences for arrow keys
         if esc_state == 1 {
             if byte == b'[' {
@@ -525,6 +591,64 @@ fn init_network() {
     }
 }
 
+/// Cancel any running command (called when Ctrl+C is pressed)
+fn cancel_running_command() -> bool {
+    unsafe {
+        if !COMMAND_RUNNING {
+            return false;
+        }
+        
+        // Check if ping is running
+        if let Some(ref ping) = PING_STATE {
+            if ping.continuous {
+                uart::write_line("^C");
+                print_ping_statistics();
+                PING_STATE = None;
+                COMMAND_RUNNING = false;
+                return true;
+            }
+        }
+        
+        // Generic command cancellation
+        COMMAND_RUNNING = false;
+        uart::write_line("^C");
+        true
+    }
+}
+
+/// Print ping statistics summary (like Linux ping)
+fn print_ping_statistics() {
+    unsafe {
+        if let Some(ref ping) = PING_STATE {
+            let mut ip_buf = [0u8; 16];
+            let ip_len = net::format_ipv4(ping.target, &mut ip_buf);
+            
+            uart::write_line("");
+            uart::write_str("--- ");
+            uart::write_bytes(&ip_buf[..ip_len]);
+            uart::write_line(" ping statistics ---");
+            
+            uart::write_u64(ping.packets_sent as u64);
+            uart::write_str(" packets transmitted, ");
+            uart::write_u64(ping.packets_received as u64);
+            uart::write_str(" received, ");
+            uart::write_u64(ping.packet_loss_percent() as u64);
+            uart::write_line("% packet loss");
+            
+            if ping.packets_received > 0 {
+                uart::write_str("rtt min/avg/max = ");
+                uart::write_u64(ping.min_rtt as u64);
+                uart::write_str("/");
+                uart::write_u64(ping.avg_rtt() as u64);
+                uart::write_str("/");
+                uart::write_u64(ping.max_rtt as u64);
+                uart::write_line(" ms");
+            }
+            uart::write_line("");
+        }
+    }
+}
+
 /// Poll the network stack
 fn poll_network() {
     let timestamp = get_time_ms();
@@ -533,29 +657,53 @@ fn poll_network() {
         if let Some(ref mut state) = NET_STATE {
             state.poll(timestamp);
             
-            // Check for ping reply
+            // Handle continuous ping
             if let Some(ref mut ping) = PING_STATE {
+                // Check for ping reply
                 if ping.waiting {
                     if let Some((from, _ident, seq)) = state.check_ping_reply() {
                         if seq == ping.seq {
                             let rtt = timestamp - ping.sent_time;
+                            ping.record_reply(rtt);
+                            
                             let mut ip_buf = [0u8; 16];
                             let ip_len = net::format_ipv4(from, &mut ip_buf);
-                            uart::write_str("\x1b[1;32m64 bytes from ");
+                            uart::write_str("64 bytes from ");
                             uart::write_bytes(&ip_buf[..ip_len]);
                             uart::write_str(": icmp_seq=");
                             uart::write_u64(seq as u64);
                             uart::write_str(" time=");
                             uart::write_u64(rtt as u64);
-                            uart::write_line(" ms\x1b[0m");
+                            uart::write_line(" ms");
                             ping.waiting = false;
                         }
                     }
                     
-                    // Timeout after 5 seconds
+                    // Timeout after 5 seconds for current ping
                     if timestamp - ping.sent_time > 5000 {
-                        uart::write_line("\x1b[1;31mRequest timed out\x1b[0m");
+                        uart::write_str("Request timeout for icmp_seq ");
+                        uart::write_u64(ping.seq as u64);
+                        uart::write_line("");
                         ping.waiting = false;
+                    }
+                }
+                
+                // In continuous mode, send next ping after 1 second interval
+                if ping.continuous && !ping.waiting {
+                    if timestamp - ping.last_send_time >= 1000 {
+                        ping.seq = ping.seq.wrapping_add(1);
+                        ping.sent_time = timestamp;
+                        ping.last_send_time = timestamp;
+                        ping.packets_sent += 1;
+                        
+                        match state.send_ping(ping.target, ping.seq, timestamp) {
+                            Ok(()) => {
+                                ping.waiting = true;
+                            }
+                            Err(_e) => {
+                                // Failed to send, will retry next interval
+                            }
+                        }
                     }
                 }
             }
@@ -709,7 +857,9 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
 
 /// Execute a command (separated for cleaner redirection handling)
 fn execute_command(cmd: &[u8], args: &[u8]) {
-    if eq_cmd(cmd, b"echo") {
+    if eq_cmd(cmd, b"help") {
+        cmd_help();
+    } else if eq_cmd(cmd, b"echo") {
         cmd_echo(args);
     } else if eq_cmd(cmd, b"clear") {
         for _ in 0..20 {
@@ -756,6 +906,41 @@ fn execute_command(cmd: &[u8], args: &[u8]) {
         out_bytes(cmd);
         out_line("");
     }
+}
+
+/// Help command - show available commands
+fn cmd_help() {
+    out_line("\x1b[1;36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m                   \x1b[1;97mRISK-V OS Commands\x1b[0m                        \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m├─────────────────────────────────────────────────────────────┤\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mGeneral:\x1b[0m                                                  \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    help          Show this help message                     \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    clear         Clear the screen                           \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    echo <text>   Print text to console                      \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    shutdown      Power off the system                       \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mFilesystem:\x1b[0m                                               \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    ls            List files                                 \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    cat <file>    Display file contents                      \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    write <f> <d> Write data to file                         \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mNetwork:\x1b[0m                                                  \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    ip addr       Show network configuration                 \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    ping <host>   Ping a host (Ctrl+C to stop)               \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    nslookup <h>  DNS lookup                                 \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    netstat       Show network statistics                    \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mMemory:\x1b[0m                                                   \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    memstats      Show memory statistics                     \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    memtest [n]   Run memory allocation test                 \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mRedirection:\x1b[0m                                              \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    cmd > file    Overwrite file with output                 \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    cmd >> file   Append output to file                      \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;32mTip:\x1b[0m Press \x1b[1;97mCtrl+C\x1b[0m to cancel running commands            \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m       Use \x1b[1;97m↑/↓\x1b[0m arrows to browse command history             \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
 }
 
 /// Echo command - print arguments to output
@@ -1035,6 +1220,7 @@ fn cmd_ping(args: &[u8]) {
         uart::write_line("\x1b[0;90mExamples:\x1b[0m");
         uart::write_line("  ping 10.0.2.2");
         uart::write_line("  ping google.com");
+        uart::write_line("\x1b[0;90mPress Ctrl+C to stop\x1b[0m");
         return;
     }
     
@@ -1082,39 +1268,31 @@ fn cmd_ping(args: &[u8]) {
     
     unsafe {
         if let Some(ref mut state) = NET_STATE {
-            // Get current sequence number
-            let seq = match &PING_STATE {
-                Some(ps) => ps.seq.wrapping_add(1),
-                None => 1,
-            };
-            
             let timestamp = get_time_ms();
             
             let mut ip_buf = [0u8; 16];
             let ip_len = net::format_ipv4(target, &mut ip_buf);
-            uart::write_str("\x1b[1;36mPING\x1b[0m ");
+            uart::write_str("PING ");
             uart::write_bytes(&ip_buf[..ip_len]);
-            uart::write_line(" 56 bytes of data");
+            uart::write_line(" 56(84) bytes of data.");
             
-            // Set up ping state
-            PING_STATE = Some(PingState {
-                target,
-                seq,
-                sent_time: timestamp,
-                waiting: true,
-            });
+            // Set up continuous ping state
+            let mut ping_state = PingState::new(target, timestamp);
+            ping_state.seq = 1;
+            ping_state.sent_time = timestamp;
+            ping_state.last_send_time = timestamp;
+            ping_state.packets_sent = 1;
+            ping_state.waiting = true;
             
-            // Send the actual ICMP echo request
-            match state.send_ping(target, seq, timestamp) {
+            // Send the first ICMP echo request immediately
+            match state.send_ping(target, ping_state.seq, timestamp) {
                 Ok(()) => {
-                    uart::write_str("\x1b[0;90m[ICMP]\x1b[0m Echo request seq=");
-                    uart::write_u64(seq as u64);
-                    uart::write_line(" sent");
+                    PING_STATE = Some(ping_state);
+                    COMMAND_RUNNING = true;
                 }
                 Err(e) => {
-                    uart::write_str("\x1b[1;31m[ICMP]\x1b[0m Failed: ");
+                    uart::write_str("ping: ");
                     uart::write_line(e);
-                    PING_STATE = None;
                 }
             }
         } else {
