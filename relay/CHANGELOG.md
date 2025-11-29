@@ -1,3 +1,13 @@
+## 0.1.0 (2025-11-29)
+
+### 🚀 Features
+
+- implement http with tls 1.2 and 1.3 over webTransport Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([ae5ff04](https://github.com/elribonazo/riscv-vm/commit/ae5ff04))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.5 (2025-11-29)
 
 ### 🩹 Fixes
