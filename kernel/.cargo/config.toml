@@ -1,4 +1,10 @@
 [build]
 target = "riscv64gc-unknown-none-elf"
 
-
+[target.riscv64gc-unknown-none-elf]
+# Enable linker relaxation which can convert JAL to AUIPC+JALR for long jumps
+# This helps when code size exceeds the 1MB JAL range
+rustflags = [
+    "-C", "link-arg=--relax",
+    "-C", "link-arg=--no-relax-gp",
+]

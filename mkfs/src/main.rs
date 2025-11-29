@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 const SECTOR_SIZE: u64 = 512;
@@ -61,36 +61,82 @@ fn main() -> std::io::Result<()> {
         }
     }
     
-    // 3. Import Files
-    if let Some(src_dir) = args.dir {
+    let mut dir_idx = 0u64;
+    
+    // 3. Import Files from root directory (non-recursive, just files in root)
+    if let Some(ref src_dir) = args.dir {
         if src_dir.exists() {
-            let mut dir_idx = 0;
-            for entry in fs::read_dir(src_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    let filename = path.file_name().unwrap().to_str().unwrap();
-                    if filename.len() > 23 {
-                        println!("Skipping {}: Name too long (max 23 chars)", filename);
-                        continue;
-                    }
-                    println!("Importing {}", filename);
-                    
-                    let data = fs::read(&path)?;
-                    let head_sector = write_data(&mut file, &mut bitmap, &data)?;
-                    write_dir_entry(&mut file, dir_idx, filename, data.len() as u32, head_sector)?;
-                    dir_idx += 1;
-                }
-            }
+            dir_idx = import_directory(&mut file, &mut bitmap, src_dir, dir_idx, "")?;
+        }
+    }
+    
+    // 4. Import files from usr/bin/ subdirectory (scripts with /usr/bin/ prefix)
+    if let Some(ref src_dir) = args.dir {
+        let usr_bin_dir = src_dir.join("usr").join("bin");
+        if usr_bin_dir.exists() {
+            println!("\n📜 Importing scripts from usr/bin/...");
+            dir_idx = import_directory(&mut file, &mut bitmap, &usr_bin_dir, dir_idx, "/usr/bin/")?;
+        }
+    }
+    
+    // 5. Import files from home/ subdirectory (with /home/ prefix)
+    if let Some(ref src_dir) = args.dir {
+        let home_dir = src_dir.join("home");
+        if home_dir.exists() {
+            println!("\n🏠 Importing files from home/...");
+            dir_idx = import_directory(&mut file, &mut bitmap, &home_dir, dir_idx, "/home/")?;
         }
     }
 
-    // 4. Write Bitmap back to disk
+    // 6. Write Bitmap back to disk
     file.seek(SeekFrom::Start(SEC_MAP_START * SECTOR_SIZE))?;
     file.write_all(&bitmap)?;
 
-    println!("Done.");
+    println!("\n✅ Done. {} files imported.", dir_idx);
     Ok(())
+}
+
+/// Import all files from a directory into the filesystem image
+fn import_directory(
+    file: &mut File,
+    bitmap: &mut Vec<u8>,
+    dir: &PathBuf,
+    mut dir_idx: u64,
+    prefix: &str,
+) -> std::io::Result<u64> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        // Skip subdirectories (except bin/ which is handled separately)
+        if path.is_dir() {
+            continue;
+        }
+        
+        if path.is_file() {
+            let base_name = path.file_name().unwrap().to_str().unwrap();
+            let filename = if prefix.is_empty() {
+                base_name.to_string()
+            } else {
+                format!("{}{}", prefix, base_name)
+            };
+            
+            if filename.len() > 23 {
+                println!("⚠️  Skipping {}: Name too long (max 23 chars)", filename);
+                continue;
+            }
+            
+            // Show different icon for scripts
+            let icon = if filename.ends_with(".rhai") { "📜" } else { "📄" };
+            println!("  {} Importing {}", icon, filename);
+            
+            let data = fs::read(&path)?;
+            let head_sector = write_data(file, bitmap, &data)?;
+            write_dir_entry(file, dir_idx, &filename, data.len() as u32, head_sector)?;
+            dir_idx += 1;
+        }
+    }
+    Ok(dir_idx)
 }
 
 fn find_free_sector(bitmap: &mut [u8]) -> Option<u32> {

@@ -1,4 +1,5 @@
 // kernel/src/sfs.rs
+use alloc::string::String;
 use alloc::vec::Vec;
 use crate::virtio_blk::VirtioBlock;
 
@@ -8,8 +9,8 @@ const MAGIC: u32 = 0x53465331;
 const SEC_SUPER: u64 = 0;
 const SEC_MAP_START: u64 = 1;
 const SEC_MAP_COUNT: u64 = 64;
-const SEC_DIR_START: u64 = 65;
-const SEC_DIR_COUNT: u64 = 64;
+pub const SEC_DIR_START: u64 = 65;
+pub const SEC_DIR_COUNT: u64 = 64;
 const SEC_DATA_START: u64 = 129;
 
 #[repr(C, packed)]
@@ -18,6 +19,15 @@ struct DirEntry {
     name: [u8; 24],
     size: u32,
     head: u32,
+}
+
+/// Information about a file in the filesystem
+/// Used by the scripting engine to expose directory listing
+#[derive(Clone)]
+pub struct FileInfo {
+    pub name: String,
+    pub size: u32,
+    pub is_dir: bool,
 }
 
 pub struct FileSystem {
@@ -44,6 +54,38 @@ impl FileSystem {
         })
     }
 
+    /// List all files in the root directory
+    /// Returns a Vec of FileInfo structs for use by the scripting engine
+    pub fn list_dir(&self, dev: &mut VirtioBlock, _path: &str) -> Vec<FileInfo> {
+        let mut entries = Vec::new();
+        let mut buf = [0u8; 512];
+
+        for i in 0..SEC_DIR_COUNT {
+            if dev.read_sector(SEC_DIR_START + i, &mut buf).is_ok() {
+                for j in 0..16 { // 512 / 32 = 16 entries
+                    let offset = j * 32;
+                    if buf[offset] == 0 { continue; }
+
+                    let entry = unsafe { &*(buf[offset..offset+32].as_ptr() as *const DirEntry) };
+                    
+                    // Decode Name
+                    let name_len = entry.name.iter().position(|&c| c == 0).unwrap_or(24);
+                    let name = core::str::from_utf8(&entry.name[..name_len])
+                        .unwrap_or("???")
+                        .into();
+
+                    entries.push(FileInfo {
+                        name,
+                        size: entry.size,
+                        is_dir: false, // Simple FS - everything is a file
+                    });
+                }
+            }
+        }
+        entries
+    }
+
+    /// Legacy ls function that prints directly to UART
     pub fn ls(&self, dev: &mut VirtioBlock) {
         let mut buf = [0u8; 512];
         crate::uart::write_line("SIZE        NAME");

@@ -1,0 +1,54 @@
+// memstats - Show heap memory statistics
+// Usage: memstats
+
+import * as mem from "os:mem"
+
+let total = mem.total();
+let stats = mem.stats();
+let used = stats.used;
+let free = stats.free;
+
+let total_kb = total / 1024;
+let used_kb = used / 1024;
+let free_kb = free / 1024;
+
+let percent_used = if total > 0 { (used * 100) / total } else { 0 };
+
+let bar_width = 30;
+let filled = (percent_used * bar_width) / 100;
+
+print("");
+print("\x1b[1;36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+print("\x1b[1;36m│\x1b[0m              \x1b[1;97mHeap Memory Statistics\x1b[0m                        \x1b[1;36m│\x1b[0m");
+print("\x1b[1;36m├─────────────────────────────────────────────────────────────┤\x1b[0m");
+
+let total_str = total_kb.to_string() + " KiB";
+let total_pad = " ".repeat(40 - total_str.len());
+print("\x1b[1;36m│\x1b[0m  Total:   \x1b[1;97m" + total_str + "\x1b[0m" + total_pad + "\x1b[1;36m│\x1b[0m");
+
+let used_str = used_kb.to_string() + " KiB";
+let used_pad = " ".repeat(40 - used_str.len());
+print("\x1b[1;36m│\x1b[0m  Used:    \x1b[1;33m" + used_str + "\x1b[0m" + used_pad + "\x1b[1;36m│\x1b[0m");
+
+let free_str = free_kb.to_string() + " KiB";
+let free_pad = " ".repeat(40 - free_str.len());
+print("\x1b[1;36m│\x1b[0m  Free:    \x1b[1;32m" + free_str + "\x1b[0m" + free_pad + "\x1b[1;36m│\x1b[0m");
+
+print("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
+
+let bar = "";
+let i = 0;
+while i < bar_width {
+    if i < filled {
+        bar += "\x1b[1;32m█\x1b[0m";
+    } else {
+        bar += "\x1b[0;90m░\x1b[0m";
+    }
+    i += 1;
+}
+let pct_str = percent_used.to_string() + "%";
+let pct_pad = " ".repeat(11 - pct_str.len());
+print("\x1b[1;36m│\x1b[0m  Usage:   [" + bar + "] " + pct_str + pct_pad + "\x1b[1;36m│\x1b[0m");
+
+print("\x1b[1;36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+print("");

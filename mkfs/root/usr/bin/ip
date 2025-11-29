@@ -1,0 +1,38 @@
+// ip - Show network configuration
+// Usage: ip [addr]
+
+import * as net from "os:net"
+
+let show_addr = ARGS.len() == 0 || ARGS[0] == "addr";
+
+if show_addr {
+    if !net.available() {
+        print("\x1b[1;31m✗\x1b[0m Network not initialized");
+    } else {
+        print("");
+        print("\x1b[1;34m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+        print("\x1b[1;34m│\x1b[0m            \x1b[1;97mNetwork Interface: virtio0\x1b[0m                       \x1b[1;34m│\x1b[0m");
+        print("\x1b[1;34m├─────────────────────────────────────────────────────────────┤\x1b[0m");
+        
+        let mac = net.mac();
+        let mac_pad = " ".repeat(30 - mac.len());
+        print("\x1b[1;34m│\x1b[0m  \x1b[1;33mlink/ether\x1b[0m  " + mac + mac_pad + "\x1b[1;34m│\x1b[0m");
+        
+        let ip = net.ip();
+        let prefix = net.prefix().to_string();
+        let inet_str = ip + "/" + prefix;
+        let inet_pad = " ".repeat(31 - inet_str.len());
+        print("\x1b[1;34m│\x1b[0m  \x1b[1;33minet\x1b[0m        " + inet_str + inet_pad + "\x1b[1;34m│\x1b[0m");
+        
+        let gw = net.gateway();
+        let gw_pad = " ".repeat(34 - gw.len());
+        print("\x1b[1;34m│\x1b[0m  \x1b[1;33mgateway\x1b[0m     " + gw + gw_pad + "\x1b[1;34m│\x1b[0m");
+        
+        print("\x1b[1;34m│\x1b[0m                                                             \x1b[1;34m│\x1b[0m");
+        print("\x1b[1;34m│\x1b[0m  \x1b[1;32mState: UP\x1b[0m    \x1b[0;90mMTU: 1500    Type: VirtIO-Net\x1b[0m              \x1b[1;34m│\x1b[0m");
+        print("\x1b[1;34m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+        print("");
+    }
+} else {
+    print("Usage: ip addr");
+}

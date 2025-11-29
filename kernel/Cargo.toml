@@ -9,6 +9,16 @@ riscv-rt = "0.11.0"
 panic-halt = "0.2.0"
 linked_list_allocator = "0.10"
 
+# Scripting engine for user-space commands
+# Using full engine with StandardPackage for JavaScript-like scripting
+[dependencies.rhai]
+version = "1.21"
+default-features = false
+features = [
+    "no_std",           # Required for bare-metal kernel
+    "no_time",          # No system time available
+    "f32_float",        # Use f32 instead of f64 for smaller binary (optional, can remove for f64)
+]
 
 [dependencies.smoltcp]
 version = "0.11"

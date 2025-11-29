@@ -1,0 +1,224 @@
+// ls - List files in the filesystem
+// Usage: ls [OPTIONS] [PATH]
+
+import * as fs from "os:fs"
+import * as sys from "os:sys"
+
+if !fs.available() {
+    print("\x1b[1;31mError:\x1b[0m Filesystem not available");
+    return;
+}
+
+// Parse options
+let show_long = false;
+let show_all = false;
+let human_readable = false;
+let one_per_line = false;
+let recursive = false;
+let path_filter = sys.cwd();
+
+for arg in ARGS {
+    if arg.starts_with("-") {
+        for ch in arg.chars() {
+            if ch == 'l' { show_long = true; }
+            if ch == 'a' { show_all = true; }
+            if ch == 'h' { human_readable = true; }
+            if ch == '1' { one_per_line = true; }
+            if ch == 'R' { recursive = true; }
+        }
+    } else {
+        path_filter = arg;
+        if !path_filter.starts_with("/") {
+            path_filter = "/" + path_filter;
+        }
+        if path_filter.len() > 1 && path_filter.ends_with("/") {
+            path_filter = path_filter.sub_string(0, path_filter.len() - 1);
+        }
+    }
+}
+
+let all_files = fs.ls();
+
+fn get_child_name(full_path, parent_path) {
+    let relative = "";
+    if parent_path == "/" {
+        if full_path.starts_with("/") {
+            relative = full_path.sub_string(1);
+        } else {
+            relative = full_path;
+        }
+    } else {
+        if full_path.starts_with(parent_path + "/") {
+            relative = full_path.sub_string(parent_path.len() + 1);
+        } else if full_path == parent_path {
+            return "";
+        } else {
+            return "";
+        }
+    }
+    
+    if relative.contains("/") {
+        let idx = 0;
+        for ch in relative.chars() {
+            if ch == '/' { break; }
+            idx += 1;
+        }
+        return relative.sub_string(0, idx);
+    }
+    return relative;
+}
+
+let entries = #{};
+
+for file in all_files {
+    let name = file.name;
+    
+    if recursive {
+        let base = name;
+        if name.contains("/") {
+            let parts = name.split("/");
+            base = parts[parts.len() - 1];
+        }
+        if !show_all && base.starts_with(".") {
+            continue;
+        }
+        entries[name] = #{name: name, size: file.size, is_dir: false};
+        continue;
+    }
+    
+    let child = get_child_name(name, path_filter);
+    if child == "" { continue; }
+    
+    if !show_all && child.starts_with(".") {
+        continue;
+    }
+    
+    let full_child_path = "";
+    if path_filter == "/" {
+        full_child_path = "/" + child;
+    } else {
+        full_child_path = path_filter + "/" + child;
+    }
+    
+    let is_dir = name.len() > full_child_path.len();
+    
+    if entries.contains(child) {
+        if is_dir && !entries[child].is_dir {
+            entries[child].is_dir = true;
+        }
+    } else {
+        entries[child] = #{
+            name: child, 
+            size: if is_dir { 0 } else { file.size },
+            is_dir: is_dir
+        };
+    }
+}
+
+let files = [];
+for key in entries.keys() {
+    files.push(entries[key]);
+}
+
+files.sort(|a, b| {
+    if a.is_dir && !b.is_dir { return -1; }
+    if !a.is_dir && b.is_dir { return 1; }
+    if a.name < b.name { -1 }
+    else if a.name > b.name { 1 }
+    else { 0 }
+});
+
+fn format_size(size, human) {
+    if !human {
+        return size.to_string();
+    }
+    if size < 1024 {
+        return size.to_string() + "B";
+    } else if size < 1024 * 1024 {
+        let kb = size / 1024;
+        return kb.to_string() + "K";
+    } else {
+        let mb = size / (1024 * 1024);
+        return mb.to_string() + "M";
+    }
+}
+
+if files.len() == 0 {
+    print("ls: cannot access '" + path_filter + "': No such file or directory");
+    return;
+}
+
+if show_long {
+    for file in files {
+        let size_str = "";
+        if file.is_dir {
+            size_str = "\x1b[0;90m<dir>\x1b[0m";
+        } else {
+            size_str = format_size(file.size, human_readable);
+        }
+        let padding = " ".repeat(8 - if file.is_dir { 5 } else { size_str.len() });
+        
+        let display = file.name;
+        if file.is_dir {
+            display = "\x1b[1;34m" + file.name + "/\x1b[0m";
+        } else if path_filter == "/usr/bin" || path_filter.starts_with("/usr/bin") {
+            display = "\x1b[1;32m" + file.name + "\x1b[0m";
+        }
+        
+        print(padding + size_str + "  " + display);
+    }
+    print("");
+    let dirs = 0;
+    let fils = 0;
+    for f in files {
+        if f.is_dir { dirs += 1; } else { fils += 1; }
+    }
+    print("\x1b[0;90m" + dirs.to_string() + " dir(s), " + fils.to_string() + " file(s)\x1b[0m");
+    
+} else if one_per_line {
+    for file in files {
+        if file.is_dir {
+            print(file.name + "/");
+        } else {
+            print(file.name);
+        }
+    }
+} else {
+    let max_len = 0;
+    for f in files {
+        let len = f.name.len() + if f.is_dir { 1 } else { 0 };
+        if len > max_len { max_len = len; }
+    }
+    
+    let col_width = max_len + 2;
+    if col_width < 4 { col_width = 4; }
+    let num_cols = 60 / col_width;
+    if num_cols < 1 { num_cols = 1; }
+    
+    let col = 0;
+    let line = "";
+    for file in files {
+        let name = file.name;
+        let display_len = name.len();
+        
+        if file.is_dir {
+            name = "\x1b[1;34m" + name + "/\x1b[0m";
+            display_len += 1;
+        } else if path_filter == "/usr/bin" {
+            name = "\x1b[1;32m" + name + "\x1b[0m";
+        }
+        
+        let pad = " ".repeat(col_width - display_len);
+        line = line + name + pad;
+        col += 1;
+        
+        if col >= num_cols {
+            print(line);
+            line = "";
+            col = 0;
+        }
+    }
+    if line.len() > 0 {
+        print(line);
+    }
+}

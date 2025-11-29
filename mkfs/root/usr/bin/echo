@@ -1,0 +1,8 @@
+// Usage: echo [text...]
+
+if ARGS.len() > 0 {
+    print(join(ARGS, " "));
+} else {
+    print("");
+}
+

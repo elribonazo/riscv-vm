@@ -2,7 +2,7 @@ PROVIDE(_stext = ORIGIN(REGION_TEXT));
 PROVIDE(_stack_start = ORIGIN(REGION_STACK) + LENGTH(REGION_STACK));
 PROVIDE(_max_hart_id = 0);
 PROVIDE(_hart_stack_size = 128K);
-PROVIDE(_heap_size = 128K);
+PROVIDE(_heap_size = 64M);
 
 PROVIDE(UserSoft = DefaultHandler);
 PROVIDE(SupervisorSoft = DefaultHandler);
@@ -58,6 +58,12 @@ SECTIONS
     *(.trap);
     *(.trap.rust);
 
+    /* Place critical runtime functions close to .init to stay within JAL range */
+    /* These are functions referenced by riscv-rt startup code */
+    *libriscv_rt*.rlib:*(.text .text.*);
+    *libpanic_halt*.rlib:*(.text .text.*);
+    
+    /* Now place all other text sections */
     *(.text .text.*);
   } > REGION_TEXT
 

@@ -1,0 +1,19 @@
+// uptime - Show system uptime
+// Usage: uptime
+
+import * as sys from "os:sys"
+
+let ms = sys.time();
+let total_sec = ms / 1000;
+
+let hours = total_sec / 3600;
+let minutes = (total_sec % 3600) / 60;
+let seconds = total_sec % 60;
+
+if hours > 0 {
+    print("Uptime: " + hours.to_string() + "h " + minutes.to_string() + "m " + seconds.to_string() + "s");
+} else if minutes > 0 {
+    print("Uptime: " + minutes.to_string() + "m " + seconds.to_string() + "s");
+} else {
+    print("Uptime: " + seconds.to_string() + "s");
+}

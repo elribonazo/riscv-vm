@@ -3,11 +3,12 @@
 
 mod allocator;
 mod dns;
-mod net;
-mod uart;
-mod virtio_net;
-mod virtio_blk;
 mod fs;
+mod net;
+mod scripting;
+mod uart;
+mod virtio_blk;
+mod virtio_net;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -83,6 +84,36 @@ impl PingState {
 static mut BLK_DEV: Option<virtio_blk::VirtioBlock> = None;
 static mut PING_STATE: Option<PingState> = None;
 static mut COMMAND_RUNNING: bool = false;
+
+// ─── CURRENT WORKING DIRECTORY ────────────────────────────────────────────────
+const CWD_MAX_LEN: usize = 128;
+static mut CWD: [u8; CWD_MAX_LEN] = [0u8; CWD_MAX_LEN];
+static mut CWD_LEN: usize = 1; // Start with "/" (root)
+
+/// Initialize CWD to root
+fn cwd_init() {
+    unsafe {
+        CWD[0] = b'/';
+        CWD_LEN = 1;
+    }
+}
+
+/// Get current working directory as str
+fn cwd_get() -> &'static str {
+    unsafe {
+        core::str::from_utf8(&CWD[..CWD_LEN]).unwrap_or("/")
+    }
+}
+
+/// Set current working directory
+fn cwd_set(path: &str) {
+    unsafe {
+        let bytes = path.as_bytes();
+        let len = core::cmp::min(bytes.len(), CWD_MAX_LEN);
+        CWD[..len].copy_from_slice(&bytes[..len]);
+        CWD_LEN = len;
+    }
+}
 
 // ─── OUTPUT CAPTURE FOR REDIRECTION ────────────────────────────────────────────
 const OUTPUT_BUFFER_SIZE: usize = 4096;
@@ -311,6 +342,7 @@ fn main() -> ! {
     uart::write_line("    \x1b[1;32m╰─────────────────────────────────────────────────────────────────╯\x1b[0m");
     uart::write_line("");
 
+    cwd_init();
     print_prompt();
 
     let console = uart::Console::new();
@@ -712,7 +744,9 @@ fn poll_network() {
 }
 
 fn print_prompt() {
-    uart::write_str("\x1b[1;35mrisk-v\x1b[0m:\x1b[1;34m~\x1b[0m$ ");
+    uart::write_str("\x1b[1;35mrisk-v\x1b[0m:\x1b[1;34m");
+    uart::write_str(cwd_get());
+    uart::write_str("\x1b[0m$ ");
 }
 
 /// Parse a command line for redirection operators
@@ -856,170 +890,217 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
 }
 
 /// Execute a command (separated for cleaner redirection handling)
+/// 
+/// Commands are resolved in this order:
+/// 1. Essential built-in commands (that require direct kernel access)
+/// 2. Scripts: searched in root, then /usr/bin/ directory (PATH-like)
 fn execute_command(cmd: &[u8], args: &[u8]) {
-    if eq_cmd(cmd, b"help") {
-        cmd_help();
-    } else if eq_cmd(cmd, b"echo") {
-        cmd_echo(args);
-    } else if eq_cmd(cmd, b"clear") {
-        for _ in 0..20 {
-            out_line("");
+    let cmd_str = core::str::from_utf8(cmd).unwrap_or("");
+    let args_str = core::str::from_utf8(args).unwrap_or("");
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ESSENTIAL BUILT-IN COMMANDS
+    // These require direct kernel access or cannot be implemented in scripts
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    match cmd_str {
+        // System control - requires direct hardware access
+        "shutdown" | "poweroff" => { cmd_shutdown(); return; }
+        "clear" => { for _ in 0..50 { out_line(""); } return; }
+        
+        // Directory navigation - requires shell state
+        "cd" => { cmd_cd(args_str); return; }
+        "pwd" => { out_line(cwd_get()); return; }
+        
+        // Scripting engine control
+        "node" => { cmd_node(args); return; }
+        
+        // Async network commands - require event loop integration
+        "ping" => { cmd_ping(args); return; }
+        "nslookup" => { cmd_nslookup(args); return; }
+        
+        // Low-level debugging commands
+        "readsec" => { cmd_readsec(args); return; }
+        "alloc" => { cmd_alloc(args); return; }
+        "memtest" => { cmd_memtest(args); return; }
+        
+        // Help - try script first, fall back to built-in
+        "help" => {
+            // First try to run help script
+            if let Some(script_bytes) = scripting::find_script("help") {
+                run_script_bytes(&script_bytes, args_str);
+                return;
+            }
+            // Fallback to built-in help
+            cmd_help();
+            return;
         }
-    } else if eq_cmd(cmd, b"ip") {
-        cmd_ip(args);
-    } else if eq_cmd(cmd, b"ping") {
-        cmd_ping(args);
-    } else if eq_cmd(cmd, b"nslookup") {
-        cmd_nslookup(args);
-    } else if eq_cmd(cmd, b"netstat") {
-        cmd_netstat();
-    } else if eq_cmd(cmd, b"shutdown") || eq_cmd(cmd, b"poweroff") {
-        cmd_shutdown();
-    } else if eq_cmd(cmd, b"ls") {
-        cmd_ls();
-    } else if eq_cmd(cmd, b"cat") {
-        cmd_cat(args);
-    } else if eq_cmd(cmd, b"write") {
-        // Basic write: write filename content...
-        let line = core::str::from_utf8(args).unwrap_or("");
-        if let Some((name, data)) = line.split_once(' ') {
-            unsafe {
-                if let (Some(fs), Some(dev)) = (FS_STATE.as_mut(), BLK_DEV.as_mut()) {
-                    if fs.write_file(dev, name, data.as_bytes()).is_ok() {
-                        out_line("Written.");
-                    } else {
-                        out_line("Write failed.");
-                    }
+        
+        _ => {}
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SCRIPT RESOLUTION (PATH-like)
+    // Search: 1) exact path  2) root directory  3) /usr/bin/ directory
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    if let Some(script_bytes) = scripting::find_script(cmd_str) {
+        run_script_bytes(&script_bytes, args_str);
+        return;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // COMMAND NOT FOUND
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    out_str("\x1b[1;31mCommand not found:\x1b[0m ");
+    out_line(cmd_str);
+    out_line("\x1b[0;90mTry 'help' for available commands, or check /usr/bin/ for scripts\x1b[0m");
+}
+
+/// Run a script from its bytes
+fn run_script_bytes(bytes: &[u8], args: &str) {
+    if let Ok(script) = core::str::from_utf8(bytes) {
+        match scripting::execute_script(script, args) {
+            Ok(output) => {
+                if !output.is_empty() {
+                    out_str(&output);
                 }
             }
+            Err(e) => {
+                out_str("\x1b[1;31mScript error:\x1b[0m ");
+                out_line(&e);
+            }
         }
-    } else if eq_cmd(cmd, b"memstats") {
-        cmd_memstats();
-    } else if eq_cmd(cmd, b"memtest") {
-        cmd_memtest(args);
-    } else if eq_cmd(cmd, b"alloc") {
-        cmd_alloc(args);
-    } else if eq_cmd(cmd, b"readsec") {
-        cmd_readsec(args);
     } else {
-        out_str("Unknown command: ");
-        out_bytes(cmd);
-        out_line("");
+        out_line("\x1b[1;31mError:\x1b[0m Invalid UTF-8 in script file");
     }
 }
 
-/// Help command - show available commands
+/// Node scripting engine info and configuration
+fn cmd_node(args: &[u8]) {
+    let args_str = core::str::from_utf8(args).unwrap_or("").trim();
+    
+    if args_str.is_empty() || args_str == "info" {
+        // Show scripting engine info
+        scripting::print_info();
+    } else if args_str.starts_with("log ") {
+        // Set log level: node log <level>
+        let level_str = args_str.strip_prefix("log ").unwrap_or("").trim();
+        let level = match level_str {
+            "off" | "OFF" => scripting::LogLevel::Off,
+            "error" | "ERROR" => scripting::LogLevel::Error,
+            "warn" | "WARN" => scripting::LogLevel::Warn,
+            "info" | "INFO" => scripting::LogLevel::Info,
+            "debug" | "DEBUG" => scripting::LogLevel::Debug,
+            "trace" | "TRACE" => scripting::LogLevel::Trace,
+            _ => {
+                out_line("Usage: node log <level>");
+                out_line("Levels: off, error, warn, info, debug, trace");
+                return;
+            }
+        };
+        scripting::set_log_level(level);
+        out_str("\x1b[1;32m✓\x1b[0m Script log level set to: ");
+        out_line(level_str);
+    } else if args_str == "eval" || args_str.starts_with("eval ") {
+        // Quick eval: node eval <expression>
+        let expr = args_str.strip_prefix("eval").unwrap_or("").trim();
+        if expr.is_empty() {
+            out_line("Usage: node eval <expression>");
+            out_line("Example: node eval 2 + 2 * 3");
+            return;
+        }
+        match scripting::execute_script(expr, "") {
+            Ok(output) => {
+                if !output.is_empty() {
+                    out_str(&output);
+                }
+            }
+            Err(e) => {
+                out_str("\x1b[1;31mError:\x1b[0m ");
+                out_line(&e);
+            }
+        }
+    } else if !args_str.is_empty() {
+        // node <script> [args...] - run a script file
+        let (script_name, script_args) = match args_str.split_once(' ') {
+            Some((name, rest)) => (name, rest),
+            None => (args_str, ""),
+        };
+        
+        // Resolve the script path relative to CWD
+        let resolved_path = if script_name.starts_with('/') {
+            // Absolute path - use as-is
+            alloc::string::String::from(script_name)
+        } else {
+            // Relative path (including ./, ../, or just "bin/cat")
+            resolve_path(script_name)
+        };
+        
+        unsafe {
+            if let (Some(fs), Some(dev)) = (crate::FS_STATE.as_ref(), crate::BLK_DEV.as_mut()) {
+                match fs.read_file(dev, &resolved_path) {
+                    Some(script_bytes) => {
+                        if let Ok(script) = core::str::from_utf8(&script_bytes) {
+                            match scripting::execute_script(script, script_args) {
+                                Ok(output) => {
+                                    if !output.is_empty() {
+                                        out_str(&output);
+                                    }
+                                }
+                                Err(e) => {
+                                    out_str("\x1b[1;31mScript error:\x1b[0m ");
+                                    out_line(&e);
+                                }
+                            }
+                        } else {
+                            out_line("\x1b[1;31mError:\x1b[0m Invalid UTF-8 in script file");
+                        }
+                    }
+                    None => {
+                        out_str("\x1b[1;31mError:\x1b[0m Script not found: ");
+                        out_line(&resolved_path);
+                    }
+                }
+            } else {
+                out_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
+            }
+        }
+    }
+}
+
+/// Help command - now a script, but we keep a fallback built-in
 fn cmd_help() {
     out_line("\x1b[1;36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
     out_line("\x1b[1;36m│\x1b[0m                   \x1b[1;97mRISK-V OS Commands\x1b[0m                        \x1b[1;36m│\x1b[0m");
     out_line("\x1b[1;36m├─────────────────────────────────────────────────────────────┤\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mGeneral:\x1b[0m                                                  \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    help          Show this help message                     \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    clear         Clear the screen                           \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    echo <text>   Print text to console                      \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    shutdown      Power off the system                       \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mBuilt-in:\x1b[0m                                                 \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    cd <dir>        Change directory                         \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    pwd             Print working directory                  \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    clear           Clear the screen                         \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    shutdown        Power off the system                     \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    ping <host>     Ping host (Ctrl+C to stop)               \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    nslookup <host> DNS lookup                               \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    node [info]     Scripting engine info/control            \x1b[1;36m│\x1b[0m");
     out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mFilesystem:\x1b[0m                                               \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    ls            List files                                 \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    cat <file>    Display file contents                      \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    write <f> <d> Write data to file                         \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mUser Scripts:\x1b[0m  \x1b[0;90m(in /usr/bin/ - Rhai language)\x1b[0m            \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    help, ls, cat, echo, cowsay, sysinfo, ip, memstats, ...  \x1b[1;36m│\x1b[0m");
     out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mNetwork:\x1b[0m                                                  \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    ip addr       Show network configuration                 \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    ping <host>   Ping a host (Ctrl+C to stop)               \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    nslookup <h>  DNS lookup                                 \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    netstat       Show network statistics                    \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mKernel API:\x1b[0m  \x1b[0;90m(available in scripts)\x1b[0m                      \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    ls(), read_file(), write_file(), file_exists()           \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    get_ip(), get_mac(), get_gateway(), net_available()      \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    time_ms(), sleep(ms), kernel_version(), arch()           \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m    heap_total(), heap_used(), heap_free()                   \x1b[1;36m│\x1b[0m");
     out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mMemory:\x1b[0m                                                   \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    memstats      Show memory statistics                     \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    memtest [n]   Run memory allocation test                 \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mRedirection:\x1b[0m  cmd > file | cmd >> file                    \x1b[1;36m│\x1b[0m");
     out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mRedirection:\x1b[0m                                              \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    cmd > file    Overwrite file with output                 \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m    cmd >> file   Append output to file                      \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;32mTip:\x1b[0m Press \x1b[1;97mCtrl+C\x1b[0m to cancel running commands            \x1b[1;36m│\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m       Use \x1b[1;97m↑/↓\x1b[0m arrows to browse command history             \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m  \x1b[1;32mTip:\x1b[0m  \x1b[1;97mCtrl+C\x1b[0m cancel  |  \x1b[1;97m↑/↓\x1b[0m history  |  \x1b[1;97mnode info\x1b[0m API  \x1b[1;36m│\x1b[0m");
     out_line("\x1b[1;36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
 }
 
-/// Echo command - print arguments to output
-fn cmd_echo(args: &[u8]) {
-    out_bytes(args);
-    out_line("");
-}
-
-/// List files command (wrapper for redirection support)
-fn cmd_ls() {
-    unsafe {
-        if let (Some(_fs), Some(dev)) = (FS_STATE.as_ref(), BLK_DEV.as_mut()) {
-            out_line("SIZE        NAME");
-            out_line("----------  --------------------");
-            
-            // We need to iterate through directory entries
-            let mut buf = [0u8; 512];
-            const SEC_DIR_START: u64 = 65;
-            const SEC_DIR_COUNT: u64 = 64;
-            
-            for i in 0..SEC_DIR_COUNT {
-                if dev.read_sector(SEC_DIR_START + i, &mut buf).is_ok() {
-                    for j in 0..16 {
-                        let offset = j * 32;
-                        if buf[offset] == 0 { continue; }
-                        
-                        // Parse entry
-                        let name_bytes = &buf[offset..offset + 24];
-                        let size = u32::from_le_bytes([
-                            buf[offset + 24],
-                            buf[offset + 25],
-                            buf[offset + 26],
-                            buf[offset + 27],
-                        ]);
-                        
-                        let name_len = name_bytes.iter().position(|&c| c == 0).unwrap_or(24);
-                        
-                        out_u64(size as u64);
-                        if size < 10 { out_str("         "); }
-                        else if size < 100 { out_str("        "); }
-                        else if size < 1000 { out_str("       "); }
-                        else { out_str("      "); }
-                        out_bytes(&name_bytes[..name_len]);
-                        out_line("");
-                    }
-                }
-            }
-        } else {
-            out_line("Filesystem not available");
-        }
-    }
-}
-
-/// Cat command (wrapper for redirection support)
-fn cmd_cat(args: &[u8]) {
-    let filename = core::str::from_utf8(args).unwrap_or("").trim();
-    unsafe {
-        if let (Some(fs), Some(dev)) = (FS_STATE.as_ref(), BLK_DEV.as_mut()) {
-            match fs.read_file(dev, filename) {
-                Some(data) => {
-                    if let Ok(s) = core::str::from_utf8(&data) {
-                        // Don't add extra newline if content already ends with one
-                        if s.ends_with('\n') {
-                            out_str(s);
-                        } else {
-                            out_line(s);
-                        }
-                    } else {
-                        out_bytes(&data);
-                        out_line("");
-                    }
-                }
-                None => out_line("File not found"),
-            }
-        } else {
-            out_line("Filesystem not available");
-        }
-    }
-}
+// Legacy cmd_ls and cmd_cat removed - now implemented as user-space scripts
+// See mkfs/root/usr/bin/ls and mkfs/root/usr/bin/cat
 
 
 fn cmd_alloc(args: &[u8]) {
@@ -1131,88 +1212,8 @@ fn cmd_memtest(args: &[u8]) {
     }
 }
 
-fn cmd_memstats() {
-    let total = allocator::heap_size();
-    let (used, free) = allocator::heap_stats();
-    let percent_used = if total > 0 { (used * 100) / total } else { 0 };
-    
-    // Create a visual bar
-    let bar_width = 30;
-    let filled = (percent_used * bar_width) / 100;
-
-    uart::write_line("");
-    uart::write_line("\x1b[1;36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-    uart::write_line("\x1b[1;36m│\x1b[0m              \x1b[1;97mHeap Memory Statistics\x1b[0m                        \x1b[1;36m│\x1b[0m");
-    uart::write_line("\x1b[1;36m├─────────────────────────────────────────────────────────────┤\x1b[0m");
-    
-    uart::write_str("\x1b[1;36m│\x1b[0m  Total:   \x1b[1;97m");
-    uart::write_u64(total as u64 / 1024);
-    uart::write_line(" KiB\x1b[0m                                        \x1b[1;36m│\x1b[0m");
-    
-    uart::write_str("\x1b[1;36m│\x1b[0m  Used:    \x1b[1;33m");
-    uart::write_u64(used as u64 / 1024);
-    uart::write_line(" KiB\x1b[0m                                        \x1b[1;36m│\x1b[0m");
-    
-    uart::write_str("\x1b[1;36m│\x1b[0m  Free:    \x1b[1;32m");
-    uart::write_u64(free as u64 / 1024);
-    uart::write_line(" KiB\x1b[0m                                        \x1b[1;36m│\x1b[0m");
-    
-    uart::write_line("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m");
-    uart::write_str("\x1b[1;36m│\x1b[0m  Usage:   [");
-    for i in 0..bar_width {
-        if i < filled {
-            uart::write_str("\x1b[1;32m█\x1b[0m");
-        } else {
-            uart::write_str("\x1b[0;90m░\x1b[0m");
-        }
-    }
-    uart::write_str("] ");
-    uart::write_u64(percent_used as u64);
-    uart::write_line("%           \x1b[1;36m│\x1b[0m");
-    uart::write_line("\x1b[1;36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
-    uart::write_line("");
-}
-
-fn cmd_ip(args: &[u8]) {
-    // Check for "addr" subcommand
-    if args.is_empty() || eq_cmd(args, b"addr") {
-        unsafe {
-            if let Some(ref state) = NET_STATE {
-                uart::write_line("");
-                uart::write_line("\x1b[1;34m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-                uart::write_line("\x1b[1;34m│\x1b[0m            \x1b[1;97mNetwork Interface: virtio0\x1b[0m                       \x1b[1;34m│\x1b[0m");
-                uart::write_line("\x1b[1;34m├─────────────────────────────────────────────────────────────┤\x1b[0m");
-                
-                uart::write_str("\x1b[1;34m│\x1b[0m  \x1b[1;33mlink/ether\x1b[0m  ");
-                uart::write_bytes(&state.mac_str());
-                uart::write_line("                              \x1b[1;34m│\x1b[0m");
-                
-                let mut ip_buf = [0u8; 16];
-                let my_ip = net::get_my_ip();
-                let ip_len = net::format_ipv4(my_ip, &mut ip_buf);
-                uart::write_str("\x1b[1;34m│\x1b[0m  \x1b[1;33minet\x1b[0m        ");
-                uart::write_bytes(&ip_buf[..ip_len]);
-                uart::write_str("/");
-                uart::write_u64(net::PREFIX_LEN as u64);
-                uart::write_line("                               \x1b[1;34m│\x1b[0m");
-                
-                let gw_len = net::format_ipv4(net::GATEWAY, &mut ip_buf);
-                uart::write_str("\x1b[1;34m│\x1b[0m  \x1b[1;33mgateway\x1b[0m     ");
-                uart::write_bytes(&ip_buf[..gw_len]);
-                uart::write_line("                                  \x1b[1;34m│\x1b[0m");
-                
-                uart::write_line("\x1b[1;34m│\x1b[0m                                                             \x1b[1;34m│\x1b[0m");
-                uart::write_line("\x1b[1;34m│\x1b[0m  \x1b[1;32mState: UP\x1b[0m    \x1b[0;90mMTU: 1500    Type: VirtIO-Net\x1b[0m              \x1b[1;34m│\x1b[0m");
-                uart::write_line("\x1b[1;34m└─────────────────────────────────────────────────────────────┘\x1b[0m");
-                uart::write_line("");
-            } else {
-                uart::write_line("\x1b[1;31m✗\x1b[0m Network not initialized");
-            }
-        }
-    } else {
-        uart::write_line("Usage: ip addr");
-    }
-}
+// Legacy cmd_memstats and cmd_ip removed - now implemented as user-space scripts
+// See mkfs/root/usr/bin/memstats and mkfs/root/usr/bin/ip
 
 fn cmd_ping(args: &[u8]) {
     if args.is_empty() {
@@ -1357,29 +1358,122 @@ fn cmd_nslookup(args: &[u8]) {
     }
 }
 
-fn cmd_netstat() {
-    unsafe {
-        if let Some(ref _state) = NET_STATE {
-            uart::write_line("");
-            uart::write_line("\x1b[1;35m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-            uart::write_line("\x1b[1;35m│\x1b[0m                   \x1b[1;97mNetwork Statistics\x1b[0m                         \x1b[1;35m│\x1b[0m");
-            uart::write_line("\x1b[1;35m├─────────────────────────────────────────────────────────────┤\x1b[0m");
-            uart::write_line("\x1b[1;35m│\x1b[0m  \x1b[1;33mDevice:\x1b[0m                                                   \x1b[1;35m│\x1b[0m");
-            uart::write_str("\x1b[1;35m│\x1b[0m    Type:     \x1b[1;97mVirtIO Network Device\x1b[0m                        \x1b[1;35m│\x1b[0m\n");
-            uart::write_str("\x1b[1;35m│\x1b[0m    Address:  \x1b[1;97m0x");
-            uart::write_hex(virtio_net::VIRTIO_NET_BASE as u64);
-            uart::write_line("\x1b[0m                           \x1b[1;35m│\x1b[0m");
-            uart::write_line("\x1b[1;35m│\x1b[0m    Status:   \x1b[1;32m● ONLINE\x1b[0m                                    \x1b[1;35m│\x1b[0m");
-            uart::write_line("\x1b[1;35m│\x1b[0m                                                             \x1b[1;35m│\x1b[0m");
-            uart::write_line("\x1b[1;35m│\x1b[0m  \x1b[1;33mProtocol Stack:\x1b[0m                                         \x1b[1;35m│\x1b[0m");
-            uart::write_line("\x1b[1;35m│\x1b[0m    \x1b[1;97msmoltcp\x1b[0m - Lightweight TCP/IP stack                     \x1b[1;35m│\x1b[0m");
-            uart::write_line("\x1b[1;35m│\x1b[0m    Protocols: ICMP, UDP, TCP, ARP                          \x1b[1;35m│\x1b[0m");
-            uart::write_line("\x1b[1;35m└─────────────────────────────────────────────────────────────┘\x1b[0m");
-            uart::write_line("");
-        } else {
-            uart::write_line("\x1b[1;31m✗\x1b[0m Network not initialized");
+// Legacy cmd_netstat removed - now implemented as user-space script
+// See mkfs/root/usr/bin/netstat
+
+/// Change directory command
+fn cmd_cd(args: &str) {
+    let path = args.trim();
+    
+    // Handle special cases
+    if path.is_empty() || path == "~" {
+        // Go to home directory (or root for now)
+        cwd_set("/");
+        return;
+    }
+    
+    if path == "-" {
+        // TODO: Previous directory (would need to track)
+        out_line("cd: OLDPWD not set");
+        return;
+    }
+    
+    // Resolve the path
+    let new_path = resolve_path(path);
+    
+    // Verify the path exists (has files under it)
+    if path_exists(&new_path) {
+        cwd_set(&new_path);
+    } else {
+        out_str("\x1b[1;31mcd:\x1b[0m ");
+        out_str(path);
+        out_line(": No such directory");
+    }
+}
+
+/// Resolve a path relative to CWD
+fn resolve_path(path: &str) -> alloc::string::String {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    
+    let mut result = String::new();
+    
+    // Start from root or CWD
+    let base = if path.starts_with('/') {
+        "/"
+    } else {
+        cwd_get()
+    };
+    
+    // Combine base and path, then normalize
+    let full = if path.starts_with('/') {
+        String::from(path)
+    } else if base == "/" {
+        let mut s = String::from("/");
+        s.push_str(path);
+        s
+    } else {
+        let mut s = String::from(base);
+        s.push('/');
+        s.push_str(path);
+        s
+    };
+    
+    // Split and normalize (handle . and ..)
+    let mut parts: Vec<&str> = Vec::new();
+    for part in full.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => { parts.pop(); }
+            p => parts.push(p),
         }
     }
+    
+    // Rebuild path
+    result.push('/');
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 { result.push('/'); }
+        result.push_str(part);
+    }
+    
+    if result.is_empty() {
+        result.push('/');
+    }
+    
+    result
+}
+
+/// Check if a path exists (has files under it or is a file)
+fn path_exists(path: &str) -> bool {
+    unsafe {
+        if let (Some(fs), Some(dev)) = (FS_STATE.as_ref(), BLK_DEV.as_mut()) {
+            // Root always exists
+            if path == "/" {
+                return true;
+            }
+            
+            let files = fs.list_dir(dev, "/");
+            let path_with_slash = if path.ends_with('/') {
+                alloc::string::String::from(path)
+            } else {
+                let mut s = alloc::string::String::from(path);
+                s.push('/');
+                s
+            };
+            
+            for file in files {
+                // Check if any file starts with this path (it's a directory)
+                if file.name.starts_with(&path_with_slash) {
+                    return true;
+                }
+                // Or if it exactly matches (it's a file)
+                if file.name == path {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn cmd_shutdown() {

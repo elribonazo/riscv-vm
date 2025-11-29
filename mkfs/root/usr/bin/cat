@@ -1,0 +1,21 @@
+// cat - Display file contents
+// Usage: cat <filename>
+
+import * as fs from "os:fs"
+
+if ARGS.len() < 1 {
+    print("Usage: cat <filename>");
+} else {
+    let filename = ARGS[0];
+    
+    if !fs.exists(filename) {
+        print("Error: File not found: " + filename);
+    } else {
+        let content = fs.read(filename);
+        if content.ends_with("\n") {
+            write(content);
+        } else {
+            print(content);
+        }
+    }
+}

@@ -1,0 +1,25 @@
+// write - Write content to a file
+// Usage: write <filename> <content...>
+
+import * as fs from "os:fs"
+
+if ARGS.len() < 2 {
+    print("Usage: write <filename> <content...>");
+    print("Example: write test.txt Hello World!");
+} else {
+    let filename = ARGS[0];
+    // Join remaining args as content
+    let content_parts = [];
+    let i = 1;
+    while i < ARGS.len() {
+        content_parts.push(ARGS[i]);
+        i += 1;
+    }
+    let content = join(content_parts, " ");
+    
+    if fs.write(filename, content) {
+        print("\x1b[1;32m✓\x1b[0m Written to " + filename);
+    } else {
+        print("\x1b[1;31mError:\x1b[0m Failed to write to " + filename);
+    }
+}
