@@ -1,3 +1,13 @@
+## 0.0.25 (2025-11-29)
+
+### 🩹 Fixes
+
+- vm output logs Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([42303e5](https://github.com/elribonazo/riscv-vm/commit/42303e5))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.24 (2025-11-29)
 
 ### 🩹 Fixes
