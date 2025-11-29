@@ -1,3 +1,13 @@
+## 0.0.26 (2025-11-29)
+
+### 🩹 Fixes
+
+- upgrade VM performance Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([c2027cd](https://github.com/elribonazo/riscv-vm/commit/c2027cd))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.25 (2025-11-29)
 
 ### 🩹 Fixes
