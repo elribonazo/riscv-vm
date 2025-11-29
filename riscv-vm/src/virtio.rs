@@ -939,7 +939,7 @@ impl VirtioDevice for VirtioNet {
             INTERRUPT_STATUS_OFFSET => self.interrupt_status as u64,
             STATUS_OFFSET => self.status as u64,
             CONFIG_GENERATION_OFFSET => 0,
-            // Config space: MAC address at 0x100-0x105, status at 0x106-0x107
+            // Config space: MAC address at 0x100-0x105, status at 0x106-0x107, IP at 0x108-0x10B
             // VirtIO MMIO accesses are 32-bit aligned, so we pack bytes into 32-bit values
             _ if offset >= CONFIG_SPACE_OFFSET => {
                 let config_offset = offset - CONFIG_SPACE_OFFSET;
@@ -958,6 +958,17 @@ impl VirtioDevice for VirtioNet {
                         (self.mac[4] as u64) |
                         ((self.mac[5] as u64) << 8) |
                         ((VIRTIO_NET_S_LINK_UP as u64) << 16)
+                    }
+                    8 => {
+                        // Bytes 8-11: Assigned IP address (from relay/network controller)
+                        // Returns 0 if no IP has been assigned yet
+                        if let Some(ip) = self.backend.get_assigned_ip() {
+                            // Return IP as u32 (Little Endian)
+                            // IP: [10, 0, 2, 15] -> 0x0F02000A
+                            u32::from_le_bytes(ip) as u64
+                        } else {
+                            0 // IP not yet assigned
+                        }
                     }
                     _ => 0,
                 }

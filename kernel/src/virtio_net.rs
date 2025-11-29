@@ -567,5 +567,20 @@ impl VirtioNet {
         }
         buf
     }
+    
+    /// Read the IP address from the device configuration space.
+    /// This is a custom extension (Config offset 8 = 0x108 absolute).
+    /// Returns None if the IP is 0.0.0.0 (not yet assigned).
+    pub fn get_config_ip(&self) -> Option<[u8; 4]> {
+        // Read 32-bit value at config offset 8 (CONFIG_SPACE_OFFSET + 8)
+        let ip_u32 = unsafe { 
+            read_volatile((self.base + CONFIG_SPACE_OFFSET + 8) as *const u32) 
+        };
+        if ip_u32 == 0 {
+            None
+        } else {
+            Some(ip_u32.to_le_bytes())
+        }
+    }
 }
 

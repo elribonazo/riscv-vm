@@ -24,6 +24,12 @@ pub trait NetworkBackend: Send {
         // Default MAC: locally administered, unicast
         [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]
     }
+    
+    /// Check if an IP has been assigned by the network controller (e.g., relay server).
+    /// Returns None if no IP has been assigned yet.
+    fn get_assigned_ip(&self) -> Option<[u8; 4]> {
+        None
+    }
 }
 
 /// A no-op network backend for testing purposes.

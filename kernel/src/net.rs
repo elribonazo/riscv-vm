@@ -13,9 +13,19 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 
 /// Network configuration
-pub const IP_ADDR: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
+/// Default IP address (used as fallback if no IP is assigned by relay)
+pub const DEFAULT_IP_ADDR: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
 pub const GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
 pub const PREFIX_LEN: u8 = 24;
+
+/// Dynamic IP address assigned by the relay/network controller
+/// This is set during network initialization
+pub static mut MY_IP_ADDR: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
+
+/// Get the current IP address (safe wrapper)
+pub fn get_my_ip() -> Ipv4Address {
+    unsafe { MY_IP_ADDR }
+}
 
 /// DNS server (Google Public DNS)
 pub const DNS_SERVER: Ipv4Address = Ipv4Address::new(8, 8, 8, 8);
@@ -78,6 +88,31 @@ impl NetState {
         // Initialize the VirtIO device (phase 1 - configures queues but doesn't populate RX)
         device.init()?;
         
+        // --- IP ADDRESS DISCOVERY ---
+        // Wait up to ~2 seconds for an IP assignment from the host/relay
+        // The VM runs much faster than the network handshake
+        let mut my_ip = DEFAULT_IP_ADDR; // Fallback default
+        
+        crate::uart::write_str("    \x1b[0;90m├─\x1b[0m Waiting for IP assignment");
+        for _ in 0..20 {
+            if let Some(ip_bytes) = device.get_config_ip() {
+                my_ip = Ipv4Address::from_bytes(&ip_bytes);
+                crate::uart::write_line(" \x1b[1;32m[OK]\x1b[0m");
+                break;
+            }
+            crate::uart::write_str(".");
+            // Busy wait delay (~100ms equivalent at VM speed)
+            for _ in 0..1_000_000 { core::hint::spin_loop(); } 
+        }
+        
+        // If we didn't get an IP, show fallback message
+        if my_ip == DEFAULT_IP_ADDR {
+            crate::uart::write_line(" \x1b[1;33m[using default]\x1b[0m");
+        }
+        
+        // Save to global for other modules to use
+        unsafe { MY_IP_ADDR = my_ip; }
+        
         let mac = device.mac;
         let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
         
@@ -87,9 +122,9 @@ impl NetState {
         // Create the interface
         let mut iface = Interface::new(config, &mut DeviceWrapper(&mut device), Instant::from_millis(0));
         
-        // Configure IP address
+        // Configure IP address using the dynamic IP
         iface.update_ip_addrs(|addrs| {
-            addrs.push(IpCidr::new(IpAddress::v4(IP_ADDR.0[0], IP_ADDR.0[1], IP_ADDR.0[2], IP_ADDR.0[3]), PREFIX_LEN)).ok();
+            addrs.push(IpCidr::new(IpAddress::v4(my_ip.0[0], my_ip.0[1], my_ip.0[2], my_ip.0[3]), PREFIX_LEN)).ok();
         });
         
         // Set default gateway
@@ -158,6 +193,7 @@ impl NetState {
     
     /// Send a raw ARP request
     fn send_arp_request(&mut self, target_ip: [u8; 4]) -> Result<(), &'static str> {
+        let my_ip = get_my_ip();
         let mut frame = [0u8; 42]; // 14 (eth) + 28 (arp)
         
         // Ethernet header
@@ -172,7 +208,7 @@ impl NetState {
         frame[19] = 4; // protocol addr len
         frame[20..22].copy_from_slice(&[0x00, 0x01]); // operation = request
         frame[22..28].copy_from_slice(&self.device.mac); // sender hardware addr
-        frame[28..32].copy_from_slice(&IP_ADDR.0); // sender protocol addr
+        frame[28..32].copy_from_slice(&my_ip.0); // sender protocol addr
         frame[32..38].copy_from_slice(&[0x00; 6]); // target hardware addr (unknown)
         frame[38..42].copy_from_slice(&target_ip); // target protocol addr
         
@@ -252,14 +288,16 @@ impl NetState {
     
     /// Check if an address is our own IP
     fn is_self(addr: &Ipv4Address) -> bool {
-        addr.0 == IP_ADDR.0
+        let my_ip = get_my_ip();
+        addr.0 == my_ip.0
     }
     
     /// Check if an address is on the local subnet (10.0.2.x/24)
     fn is_on_local_subnet(addr: &Ipv4Address) -> bool {
-        addr.0[0] == IP_ADDR.0[0] && 
-        addr.0[1] == IP_ADDR.0[1] && 
-        addr.0[2] == IP_ADDR.0[2]
+        let my_ip = get_my_ip();
+        addr.0[0] == my_ip.0[0] && 
+        addr.0[1] == my_ip.0[1] && 
+        addr.0[2] == my_ip.0[2]
     }
     
     /// Send an ICMP echo request (ping) - directly via VirtIO or loopback
@@ -302,6 +340,7 @@ impl NetState {
         frame[12..14].copy_from_slice(&[0x08, 0x00]); // ethertype = IPv4
         
         // IP header
+        let my_ip = get_my_ip();
         frame[14] = 0x45; // version + IHL
         frame[15] = 0; // TOS
         frame[16..18].copy_from_slice(&(ip_len as u16).to_be_bytes()); // total length
@@ -310,7 +349,7 @@ impl NetState {
         frame[22] = 64; // TTL
         frame[23] = 1; // protocol = ICMP
         frame[24..26].copy_from_slice(&[0x00, 0x00]); // checksum (fill later)
-        frame[26..30].copy_from_slice(&IP_ADDR.0); // src IP
+        frame[26..30].copy_from_slice(&my_ip.0); // src IP
         frame[30..34].copy_from_slice(&target_bytes); // dst IP
         
         // IP checksum

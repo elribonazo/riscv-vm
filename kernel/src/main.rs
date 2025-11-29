@@ -241,7 +241,8 @@ fn init_network() {
                             uart::write_line("\x1b[0m                    \x1b[1;34m│\x1b[0m");
                             
                             let mut ip_buf = [0u8; 16];
-                            let ip_len = net::format_ipv4(net::IP_ADDR, &mut ip_buf);
+                            let my_ip = net::get_my_ip();
+                            let ip_len = net::format_ipv4(my_ip, &mut ip_buf);
                             uart::write_str("    \x1b[1;34m│\x1b[0m  IPv4 Address:  \x1b[1;97m");
                             uart::write_bytes(&ip_buf[..ip_len]);
                             uart::write_str("/");
@@ -597,7 +598,8 @@ fn cmd_ip(args: &[u8]) {
                 uart::write_line("                              \x1b[1;34m│\x1b[0m");
                 
                 let mut ip_buf = [0u8; 16];
-                let ip_len = net::format_ipv4(net::IP_ADDR, &mut ip_buf);
+                let my_ip = net::get_my_ip();
+                let ip_len = net::format_ipv4(my_ip, &mut ip_buf);
                 uart::write_str("\x1b[1;34m│\x1b[0m  \x1b[1;33minet\x1b[0m        ");
                 uart::write_bytes(&ip_buf[..ip_len]);
                 uart::write_str("/");
