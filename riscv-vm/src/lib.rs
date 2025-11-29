@@ -44,6 +44,8 @@ pub struct WasmVm {
     cpu: cpu::Cpu,
     net_status: NetworkStatus,
     poll_counter: u32,
+    halted: bool,
+    halt_code: u64,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -78,6 +80,8 @@ impl WasmVm {
             cpu, 
             net_status: NetworkStatus::Disconnected,
             poll_counter: 0,
+            halted: false,
+            halt_code: 0,
         })
     }
 
@@ -145,7 +149,13 @@ impl WasmVm {
     }
 
     /// Execute a single instruction.
-    pub fn step(&mut self) {
+    /// Returns true if the VM is still running, false if halted.
+    pub fn step(&mut self) -> bool {
+        // If already halted, don't execute more instructions
+        if self.halted {
+            return false;
+        }
+        
         // Poll VirtIO devices periodically for incoming network packets
         // Poll every 100 instructions for good network responsiveness
         self.poll_counter = self.poll_counter.wrapping_add(1);
@@ -153,8 +163,33 @@ impl WasmVm {
             self.bus.poll_virtio();
         }
         
-        // Ignore traps for now - the kernel handles them
-        let _ = self.cpu.step(&mut self.bus);
+        // Execute instruction and check for halt condition
+        match self.cpu.step(&mut self.bus) {
+            Ok(()) => true,
+            Err(Trap::RequestedTrap(code)) => {
+                // Guest requested shutdown via TEST_FINISHER
+                self.halted = true;
+                self.halt_code = code;
+                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
+                    &format!("[VM] Halted by guest request (code: {:#x})", code)));
+                false
+            }
+            Err(_trap) => {
+                // Other traps are handled by the kernel's trap handler
+                true
+            }
+        }
+    }
+    
+    /// Check if the VM has halted (e.g., due to shutdown command).
+    pub fn is_halted(&self) -> bool {
+        self.halted
+    }
+    
+    /// Get the halt code if the VM has halted.
+    /// Code 0x5555 typically means successful shutdown (PASS).
+    pub fn halt_code(&self) -> u64 {
+        self.halt_code
     }
 
     /// Get a byte from the UART output buffer, if available.
