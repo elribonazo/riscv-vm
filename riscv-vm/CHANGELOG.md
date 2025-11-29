@@ -1,3 +1,13 @@
+## 0.0.19 (2025-11-29)
+
+### 🩹 Fixes
+
+- improve reconnection logic Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([de67af8](https://github.com/elribonazo/riscv-vm/commit/de67af8))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.18 (2025-11-29)
 
 ### 🩹 Fixes
