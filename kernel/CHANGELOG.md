@@ -1,3 +1,14 @@
+## 0.0.8 (2025-11-29)
+
+### 🩹 Fixes
+
+- update kernel Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([9fc7f12](https://github.com/elribonazo/riscv-vm/commit/9fc7f12))
+- kernel improvement for dhcp async wait times Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([20dcac2](https://github.com/elribonazo/riscv-vm/commit/20dcac2))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.7 (2025-11-29)
 
 ### 🩹 Fixes

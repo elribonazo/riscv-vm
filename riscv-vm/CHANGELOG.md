@@ -1,3 +1,13 @@
+## 0.0.16 (2025-11-29)
+
+### 🩹 Fixes
+
+- virtual network over webTransport relay server Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([a9acb09](https://github.com/elribonazo/riscv-vm/commit/a9acb09))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.15 (2025-11-29)
 
 ### 🩹 Fixes
