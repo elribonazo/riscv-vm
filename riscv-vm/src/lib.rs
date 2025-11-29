@@ -89,10 +89,13 @@ impl WasmVm {
     }
     
     /// Connect to a WebTransport relay server.
+    /// Note: Connection is asynchronous. Check network_status() to monitor connection state.
     pub fn connect_webtransport(&mut self, url: &str, cert_hash: Option<String>) -> Result<(), JsValue> {
         use crate::net_webtransport::WebTransportBackend;
         use crate::virtio::VirtioNet;
 
+        // Status stays as Connecting until we can verify the connection is established
+        // (when IP is assigned, the connection is confirmed)
         self.net_status = NetworkStatus::Connecting;
 
         let backend = WebTransportBackend::new(url, cert_hash);
@@ -102,7 +105,7 @@ impl WasmVm {
         vnet.debug = false;
 
         self.bus.virtio_devices.push(Box::new(vnet));
-        self.net_status = NetworkStatus::Connected;
+        // Don't set to Connected here - let network_status() check the actual state
 
         Ok(())
     }
@@ -115,7 +118,29 @@ impl WasmVm {
     }
     
     /// Get the current network connection status.
-    pub fn network_status(&self) -> NetworkStatus {
+    /// This checks the actual connection state by seeing if an IP was assigned.
+    pub fn network_status(&mut self) -> NetworkStatus {
+        // If we think we're connecting, check if we've actually connected
+        // by seeing if we can read an assigned IP from the VirtIO config space
+        if self.net_status == NetworkStatus::Connecting {
+            // Look for a VirtioNet device (device_id == 1) and check if IP is assigned
+            for (idx, device) in self.bus.virtio_devices.iter_mut().enumerate() {
+                let dev_id = device.device_id();
+                if dev_id == 1 {
+                    // Read config space offset 8 (IP address)
+                    // IP is at config offset 0x108 - 0x100 = 8
+                    if let Ok(ip_val) = device.read(0x108) {
+                        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
+                            &format!("[network_status] Device idx={} id={} read(0x108)={:#x}", 
+                                idx, dev_id, ip_val)));
+                        if ip_val != 0 {
+                            self.net_status = NetworkStatus::Connected;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         self.net_status
     }
 

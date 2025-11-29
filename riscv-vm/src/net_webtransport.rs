@@ -122,6 +122,8 @@ mod native {
 
     impl WebTransportBackend {
         pub fn new(url: &str, cert_hash: Option<String>) -> Self {
+            eprintln!("[WebTransport] Creating backend for URL: {}", url);
+            
             // Generate a random MAC address (locally administered, unicast)
             // Use system time + process id for randomness
             let now = std::time::SystemTime::now()
@@ -160,42 +162,65 @@ mod native {
             thread::spawn(move || {
                 let rt = Runtime::new().unwrap();
                 rt.block_on(async move {
+                    eprintln!("[WebTransport] Starting connection to {}...", url);
+                    
                     let config = if let Some(hash_str) = cert_hash {
                         // Parse hex hash
-                        let bytes =
-                            hex::decode(hash_str.replace(":", "")).expect("Invalid hex hash");
-                        let array: [u8; 32] = bytes.try_into().expect("Invalid hash length");
+                        eprintln!("[WebTransport] Using certificate hash: {}", hash_str);
+                        let bytes = match hex::decode(hash_str.replace(":", "")) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                eprintln!("[WebTransport] ERROR: Invalid hex hash: {}", e);
+                                return;
+                            }
+                        };
+                        let bytes_len = bytes.len();
+                        let array: [u8; 32] = match bytes.try_into() {
+                            Ok(a) => a,
+                            Err(_) => {
+                                eprintln!("[WebTransport] ERROR: Hash must be 32 bytes, got {} bytes", bytes_len);
+                                return;
+                            }
+                        };
                         let digest = Sha256Digest::from(array);
                         ClientConfig::builder()
                             .with_bind_default()
                             .with_server_certificate_hashes(vec![digest])
                             .build()
                     } else {
+                        eprintln!("[WebTransport] WARNING: No certificate hash provided, disabling cert validation");
                         ClientConfig::builder()
                             .with_bind_default()
                             .with_no_cert_validation()
                             .build()
                     };
 
-                    let endpoint = Endpoint::client(config).unwrap();
+                    let endpoint = match Endpoint::client(config) {
+                        Ok(ep) => ep,
+                        Err(e) => {
+                            eprintln!("[WebTransport] ERROR: Failed to create endpoint: {}", e);
+                            return;
+                        }
+                    };
 
-                    log::info!("[WebTransport] Connecting to {}...", url);
-                    let connection = match endpoint.connect(url).await {
+                    eprintln!("[WebTransport] Connecting to {}...", url);
+                    let connection = match endpoint.connect(&url).await {
                         Ok(conn) => conn,
                         Err(e) => {
+                            eprintln!("[WebTransport] ERROR: Connection failed: {}", e);
                             log::error!("[WebTransport] Connection failed: {}", e);
                             return;
                         }
                     };
-                    log::info!("[WebTransport] Connected!");
+                    eprintln!("[WebTransport] Connected successfully!");
 
                     // Send registration message
                     let register_msg = make_register_message(&mac_copy);
                     if let Err(e) = connection.send_datagram(register_msg) {
-                        log::error!("[WebTransport] Failed to send registration: {}", e);
+                        eprintln!("[WebTransport] ERROR: Failed to send registration: {}", e);
                         return;
                     }
-                    log::info!("[WebTransport] Registration sent, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    eprintln!("[WebTransport] Registration sent, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                         mac_copy[0], mac_copy[1], mac_copy[2], mac_copy[3], mac_copy[4], mac_copy[5]);
 
                     let connection = Arc::new(connection);
@@ -249,11 +274,11 @@ mod native {
                                                 if let Ok(mut guard) = assigned_ip_clone.lock() {
                                                     *guard = Some(ip);
                                                 }
-                                                log::info!("[WebTransport] IP Assigned: {}.{}.{}.{}", 
+                                                eprintln!("[WebTransport] IP Assigned: {}.{}.{}.{}", 
                                                     ip[0], ip[1], ip[2], ip[3]);
                                             }
                                             
-                                            log::info!("[WebTransport] Registered with relay: {}", json_str);
+                                            eprintln!("[WebTransport] Registered with relay: {}", json_str);
                                         }
                                     }
                                 }
@@ -393,12 +418,27 @@ mod wasm {
         }
     }
 
+    // Helper to log to browser console
+    fn console_log(msg: &str) {
+        web_sys::console::log_1(&JsValue::from_str(msg));
+    }
+    
+    fn console_error(msg: &str) {
+        web_sys::console::error_1(&JsValue::from_str(msg));
+    }
+
     impl NetworkBackend for WebTransportBackend {
         fn init(&mut self) -> Result<(), String> {
+            console_log(&format!("[WebTransport] Initializing connection to {}", self.url));
+            
             let options = WebTransportOptions::new();
 
             if let Some(hash_hex) = &self.cert_hash {
-                let bytes = hex::decode(hash_hex.replace(":", "")).map_err(|e| e.to_string())?;
+                console_log(&format!("[WebTransport] Using certificate hash: {}", hash_hex));
+                let bytes = hex::decode(hash_hex.replace(":", "")).map_err(|e| {
+                    console_error(&format!("[WebTransport] Invalid hex hash: {}", e));
+                    e.to_string()
+                })?;
                 let array = Uint8Array::from(&bytes[..]);
 
                 let hash_obj = WebTransportHash::new();
@@ -408,15 +448,25 @@ mod wasm {
                 let hashes = Array::new();
                 hashes.push(&hash_obj);
                 options.set_server_certificate_hashes(&hashes);
+            } else {
+                console_log("[WebTransport] No certificate hash provided (using system trust)");
             }
 
-            let transport = WebTransport::new_with_options(&self.url, &options)
-                .map_err(|e| format!("Failed to create WebTransport: {:?}", e))?;
+            let transport = match WebTransport::new_with_options(&self.url, &options) {
+                Ok(t) => t,
+                Err(e) => {
+                    let msg = format!("Failed to create WebTransport: {:?}", e);
+                    console_error(&format!("[WebTransport] {}", msg));
+                    return Err(msg);
+                }
+            };
+            console_log("[WebTransport] Transport object created, waiting for connection...");
 
             let rx_queue = self.rx_queue.clone();
             let registered = self.registered.clone();
             let assigned_ip = self.assigned_ip.clone();
             let mac = self.mac;
+            let url = self.url.clone();
 
             // Setup writer first so we can send registration
             let datagrams = transport.datagrams();
@@ -428,27 +478,24 @@ mod wasm {
             let ready_promise = transport.ready();
 
             wasm_bindgen_futures::spawn_local(async move {
+                console_log(&format!("[WebTransport] Connecting to {}...", url));
+                
                 match JsFuture::from(ready_promise).await {
                     Ok(_) => {
-                        log::info!("WebTransport ready!");
+                        console_log("[WebTransport] Connected successfully!");
 
                         // Send registration message
                         let register_msg = make_register_message(&mac);
                         let array = Uint8Array::from(&register_msg[..]);
                         let promise = writer_clone.write_with_chunk(&array);
                         if let Err(e) = JsFuture::from(promise).await {
-                            log::error!("Failed to send registration: {:?}", e);
+                            console_error(&format!("[WebTransport] Failed to send registration: {:?}", e));
                             return;
                         }
-                        log::info!(
-                            "Registration sent, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            mac[0],
-                            mac[1],
-                            mac[2],
-                            mac[3],
-                            mac[4],
-                            mac[5]
-                        );
+                        console_log(&format!(
+                            "[WebTransport] Registration sent, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                        ));
 
                         // Spawn heartbeat sender using JS setInterval via global scope
                         let writer_heartbeat = writer_clone.clone();
@@ -508,16 +555,20 @@ mod wasm {
                                                 // Parse IP from JSON
                                                 if let Some(ip) = parse_ip_from_json(json_str) {
                                                     *assigned_ip.borrow_mut() = Some(ip);
-                                                    log::info!(
+                                                    console_log(&format!(
                                                         "[WebTransport] IP Assigned: {}.{}.{}.{}",
                                                         ip[0], ip[1], ip[2], ip[3]
-                                                    );
+                                                    ));
                                                 }
                                                 
-                                                log::info!(
-                                                    "Registered with relay: {}",
+                                                console_log(&format!(
+                                                    "[WebTransport] Registered with relay: {}",
                                                     json_str
-                                                );
+                                                ));
+                                            } else if json_str.contains("\"type\":\"HeartbeatAck\"") {
+                                                // Heartbeat acknowledged - connection is alive
+                                            } else if json_str.contains("\"type\":\"Error\"") {
+                                                console_error(&format!("[WebTransport] Relay error: {}", json_str));
                                             }
                                         }
                                     }
@@ -528,14 +579,14 @@ mod wasm {
                                     }
                                 }
                                 Err(e) => {
-                                    log::error!("Read error: {:?}", e);
+                                    console_error(&format!("[WebTransport] Read error: {:?}", e));
                                     break;
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        log::error!("WebTransport failed to connect: {:?}", e);
+                        console_error(&format!("[WebTransport] Failed to connect: {:?}", e));
                     }
                 }
             });

@@ -2,6 +2,9 @@ use crate::dram::{Dram, MemoryError};
 use crate::bus::DRAM_BASE;
 use crate::net::NetworkBackend;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen;
+
 // MMIO register *values* expected by the xv6 VirtIO driver.
 const MAGIC_VALUE: u64 = 0x7472_6976;
 const VERSION: u64 = 2; // Legacy VirtIO MMIO version
@@ -962,7 +965,11 @@ impl VirtioDevice for VirtioNet {
                     8 => {
                         // Bytes 8-11: Assigned IP address (from relay/network controller)
                         // Returns 0 if no IP has been assigned yet
-                        if let Some(ip) = self.backend.get_assigned_ip() {
+                        let ip_opt = self.backend.get_assigned_ip();
+                        #[cfg(target_arch = "wasm32")]
+                        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
+                            &format!("[VirtioNet] Config read offset=8, backend.get_assigned_ip()={:?}", ip_opt)));
+                        if let Some(ip) = ip_opt {
                             // Return IP as u32 (Little Endian)
                             // IP: [10, 0, 2, 15] -> 0x0F02000A
                             u32::from_le_bytes(ip) as u64

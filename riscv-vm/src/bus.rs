@@ -5,6 +5,9 @@ use crate::virtio::VirtioDevice;
 use crate::Trap;
 use crate::dram::Dram;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen;
+
 /// Default DRAM base for the virt platform.
 pub const DRAM_BASE: u64 = 0x8000_0000;
 
@@ -315,6 +318,13 @@ impl Bus for SystemBus {
 
         if let Some((idx, offset)) = self.get_virtio_device(addr) {
             let val = self.virtio_devices[idx].read(offset).map_err(|_| Trap::LoadAccessFault(addr))?;
+            // Debug: Log VirtIO config space reads (offset >= 0x100) for network device
+            #[cfg(target_arch = "wasm32")]
+            if offset >= 0x100 && self.virtio_devices[idx].device_id() == 1 {
+                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
+                    &format!("[Bus] VirtIO read addr={:#x} idx={} offset={:#x} val={:#x}", 
+                        addr, idx, offset, val)));
+            }
             return Ok(val as u32);
         }
         
