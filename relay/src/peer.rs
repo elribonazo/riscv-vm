@@ -126,7 +126,9 @@ impl PeerManager {
             ip_to_peer: HashMap::new(),
             ip_pool: IpPool::new(),
             next_id: 1,
-            heartbeat_timeout: 60,
+            // Increased timeout to tolerate browser tabs going to background
+            // Browser tabs may not run JS timers reliably when backgrounded
+            heartbeat_timeout: 120,
         }
     }
 

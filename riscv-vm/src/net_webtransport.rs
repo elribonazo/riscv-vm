@@ -12,8 +12,8 @@ const MSG_TYPE_CONTROL: u8 = 0x00;
 /// Message type prefix for Ethernet data frames
 const MSG_TYPE_DATA: u8 = 0x01;
 
-/// Heartbeat interval in seconds
-const HEARTBEAT_INTERVAL_SECS: u64 = 20;
+/// Heartbeat interval in seconds (reduced for better keepalive in browsers)
+const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 
 /// Control message for registration
 fn make_register_message(mac: &[u8; 6]) -> Vec<u8> {
@@ -369,16 +369,33 @@ mod wasm {
         WritableStreamDefaultWriter,
     };
 
+    /// Connection state for tracking and reconnection
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum ConnectionState {
+        Disconnected,
+        Connecting,
+        Connected,
+    }
+
+    /// Shared state between the backend and async tasks
+    struct SharedState {
+        rx_queue: VecDeque<Vec<u8>>,
+        registered: bool,
+        assigned_ip: Option<[u8; 4]>,
+        connection_state: ConnectionState,
+        /// Counter incremented on each reconnect to invalidate old tasks
+        connection_generation: u32,
+        /// Heartbeat interval ID for cleanup
+        heartbeat_interval_id: Option<i32>,
+    }
+
     pub struct WebTransportBackend {
         url: String,
         cert_hash: Option<String>,
         mac: [u8; 6],
-        transport: Option<WebTransport>,
-        writer: Option<WritableStreamDefaultWriter>,
-        rx_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
-        registered: Rc<RefCell<bool>>,
-        /// IP address assigned by the relay server
-        assigned_ip: Rc<RefCell<Option<[u8; 4]>>>,
+        transport: Rc<RefCell<Option<WebTransport>>>,
+        writer: Rc<RefCell<Option<WritableStreamDefaultWriter>>>,
+        state: Rc<RefCell<SharedState>>,
     }
 
     // WASM is single threaded
@@ -400,21 +417,254 @@ mod wasm {
             mac[4] = ((rand1 >> 8) & 0xff) as u8;
             mac[5] = (rand2 & 0xff) as u8;
 
+            let state = Rc::new(RefCell::new(SharedState {
+                rx_queue: VecDeque::new(),
+                registered: false,
+                assigned_ip: None,
+                connection_state: ConnectionState::Disconnected,
+                connection_generation: 0,
+                heartbeat_interval_id: None,
+            }));
+
             Self {
                 url: url.to_string(),
                 cert_hash,
                 mac,
-                transport: None,
-                writer: None,
-                rx_queue: Rc::new(RefCell::new(VecDeque::new())),
-                registered: Rc::new(RefCell::new(false)),
-                assigned_ip: Rc::new(RefCell::new(None)),
+                transport: Rc::new(RefCell::new(None)),
+                writer: Rc::new(RefCell::new(None)),
+                state,
             }
         }
 
         /// Check if registered with the relay
         pub fn is_registered(&self) -> bool {
-            *self.registered.borrow()
+            self.state.borrow().registered
+        }
+        
+        /// Check if connected
+        pub fn is_connected(&self) -> bool {
+            self.state.borrow().connection_state == ConnectionState::Connected
+        }
+        
+        /// Start the connection process
+        fn start_connection(&self) {
+            let url = self.url.clone();
+            let cert_hash = self.cert_hash.clone();
+            let mac = self.mac;
+            let state = self.state.clone();
+            let transport_rc = self.transport.clone();
+            let writer_rc = self.writer.clone();
+            
+            // Increment generation and mark as connecting
+            {
+                let mut s = state.borrow_mut();
+                s.connection_generation += 1;
+                s.connection_state = ConnectionState::Connecting;
+                s.registered = false;
+                // Clear old heartbeat interval
+                if let Some(id) = s.heartbeat_interval_id.take() {
+                    clear_interval(id);
+                }
+            }
+            let generation = state.borrow().connection_generation;
+            
+            console_log(&format!("[WebTransport] Starting connection (gen={}) to {}", generation, url));
+            
+            wasm_bindgen_futures::spawn_local(async move {
+                // Check if this connection attempt is still valid
+                if state.borrow().connection_generation != generation {
+                    console_log("[WebTransport] Connection attempt superseded, aborting");
+                    return;
+                }
+                
+                let options = WebTransportOptions::new();
+
+                if let Some(hash_hex) = &cert_hash {
+                    match hex::decode(hash_hex.replace(":", "")) {
+                        Ok(bytes) => {
+                            let array = Uint8Array::from(&bytes[..]);
+                            let hash_obj = WebTransportHash::new();
+                            hash_obj.set_algorithm("sha-256");
+                            hash_obj.set_value(&array);
+                            let hashes = Array::new();
+                            hashes.push(&hash_obj);
+                            options.set_server_certificate_hashes(&hashes);
+                        }
+                        Err(e) => {
+                            console_error(&format!("[WebTransport] Invalid cert hash: {}", e));
+                            state.borrow_mut().connection_state = ConnectionState::Disconnected;
+                            return;
+                        }
+                    }
+                }
+
+                let transport = match WebTransport::new_with_options(&url, &options) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        console_error(&format!("[WebTransport] Failed to create transport: {:?}", e));
+                        state.borrow_mut().connection_state = ConnectionState::Disconnected;
+                        // Schedule reconnection
+                        schedule_reconnect(state.clone(), transport_rc.clone(), writer_rc.clone(), 
+                                         url.clone(), cert_hash.clone(), mac, 5000);
+                        return;
+                    }
+                };
+
+                let datagrams = transport.datagrams();
+                let writable = datagrams.writable();
+                let writer = match writable.get_writer() {
+                    Ok(w) => w,
+                    Err(e) => {
+                        console_error(&format!("[WebTransport] Failed to get writer: {:?}", e));
+                        state.borrow_mut().connection_state = ConnectionState::Disconnected;
+                        schedule_reconnect(state.clone(), transport_rc.clone(), writer_rc.clone(),
+                                         url.clone(), cert_hash.clone(), mac, 5000);
+                        return;
+                    }
+                };
+
+                let ready_promise = transport.ready();
+                
+                match JsFuture::from(ready_promise).await {
+                    Ok(_) => {
+                        // Check generation again
+                        if state.borrow().connection_generation != generation {
+                            console_log("[WebTransport] Connection superseded during handshake");
+                            return;
+                        }
+                        
+                        console_log("[WebTransport] Connected successfully!");
+                        
+                        // Send registration
+                        let register_msg = make_register_message(&mac);
+                        let array = Uint8Array::from(&register_msg[..]);
+                        if let Err(e) = JsFuture::from(writer.write_with_chunk(&array)).await {
+                            console_error(&format!("[WebTransport] Failed to register: {:?}", e));
+                            state.borrow_mut().connection_state = ConnectionState::Disconnected;
+                            schedule_reconnect(state.clone(), transport_rc.clone(), writer_rc.clone(),
+                                             url.clone(), cert_hash.clone(), mac, 5000);
+                            return;
+                        }
+                        
+                        console_log(&format!(
+                            "[WebTransport] Registration sent, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                        ));
+                        
+                        // Store transport and writer
+                        *transport_rc.borrow_mut() = Some(transport.clone());
+                        *writer_rc.borrow_mut() = Some(writer.clone());
+                        
+                        // Setup heartbeat with visibility-aware interval
+                        let writer_hb = writer.clone();
+                        let state_hb = state.clone();
+                        let generation_hb = generation;
+                        
+                        let heartbeat_closure = Closure::wrap(Box::new(move || {
+                            // Only send if still same generation
+                            if state_hb.borrow().connection_generation == generation_hb {
+                                let heartbeat = make_heartbeat_message();
+                                let array = Uint8Array::from(&heartbeat[..]);
+                                let _ = writer_hb.write_with_chunk(&array);
+                            }
+                        }) as Box<dyn Fn()>);
+                        
+                        let interval_id = set_interval(&heartbeat_closure, (HEARTBEAT_INTERVAL_SECS * 1000) as i32);
+                        heartbeat_closure.forget();
+                        state.borrow_mut().heartbeat_interval_id = Some(interval_id);
+                        
+                        // Setup visibility change handler for immediate heartbeat on tab focus
+                        setup_visibility_handler(writer.clone(), state.clone(), generation);
+                        
+                        // Mark as connected
+                        state.borrow_mut().connection_state = ConnectionState::Connected;
+                        
+                        // Start reader loop
+                        let readable = transport.datagrams().readable();
+                        let reader: ReadableStreamDefaultReader = readable.get_reader().unchecked_into();
+                        
+                        loop {
+                            // Check if we should stop
+                            if state.borrow().connection_generation != generation {
+                                console_log("[WebTransport] Reader loop: generation changed, stopping");
+                                break;
+                            }
+                            
+                            match JsFuture::from(reader.read()).await {
+                                Ok(result) => {
+                                    let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+                                        .unwrap()
+                                        .as_bool()
+                                        .unwrap_or(true);
+                                    if done {
+                                        console_log("[WebTransport] Reader stream ended");
+                                        break;
+                                    }
+                                    
+                                    let value = js_sys::Reflect::get(&result, &JsValue::from_str("value")).unwrap();
+                                    let array = Uint8Array::new(&value);
+                                    let data = array.to_vec();
+                                    
+                                    // Handle control messages
+                                    if !data.is_empty() && data[0] == MSG_TYPE_CONTROL {
+                                        if let Ok(json_str) = std::str::from_utf8(&data[1..]) {
+                                            if json_str.contains("\"type\":\"Assigned\"") {
+                                                let mut s = state.borrow_mut();
+                                                s.registered = true;
+                                                if let Some(ip) = parse_ip_from_json(json_str) {
+                                                    s.assigned_ip = Some(ip);
+                                                    drop(s);
+                                                    console_log(&format!(
+                                                        "[WebTransport] IP Assigned: {}.{}.{}.{}",
+                                                        ip[0], ip[1], ip[2], ip[3]
+                                                    ));
+                                                }
+                                            } else if json_str.contains("\"type\":\"Error\"") {
+                                                console_error(&format!("[WebTransport] Relay error: {}", json_str));
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Queue Ethernet frames
+                                    if let Some(frame) = decode_message(&data) {
+                                        state.borrow_mut().rx_queue.push_back(frame);
+                                    }
+                                }
+                                Err(e) => {
+                                    console_error(&format!("[WebTransport] Read error: {:?}", e));
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Connection ended - cleanup and reconnect
+                        console_log("[WebTransport] Connection lost, scheduling reconnection...");
+                        {
+                            let mut s = state.borrow_mut();
+                            if s.connection_generation == generation {
+                                s.connection_state = ConnectionState::Disconnected;
+                                s.registered = false;
+                                if let Some(id) = s.heartbeat_interval_id.take() {
+                                    clear_interval(id);
+                                }
+                            }
+                        }
+                        *transport_rc.borrow_mut() = None;
+                        *writer_rc.borrow_mut() = None;
+                        
+                        // Only reconnect if this is still the current generation
+                        if state.borrow().connection_generation == generation {
+                            schedule_reconnect(state, transport_rc, writer_rc, url, cert_hash, mac, 3000);
+                        }
+                    }
+                    Err(e) => {
+                        console_error(&format!("[WebTransport] Failed to connect: {:?}", e));
+                        state.borrow_mut().connection_state = ConnectionState::Disconnected;
+                        schedule_reconnect(state.clone(), transport_rc.clone(), writer_rc.clone(),
+                                         url.clone(), cert_hash.clone(), mac, 5000);
+                    }
+                }
+            });
         }
     }
 
@@ -426,183 +676,115 @@ mod wasm {
     fn console_error(msg: &str) {
         web_sys::console::error_1(&JsValue::from_str(msg));
     }
+    
+    /// Set up a JS interval and return its ID
+    fn set_interval(closure: &Closure<dyn Fn()>, ms: i32) -> i32 {
+        let global = js_sys::global();
+        let set_interval = js_sys::Reflect::get(&global, &JsValue::from_str("setInterval"))
+            .expect("setInterval should exist");
+        let set_interval_fn: js_sys::Function = set_interval.unchecked_into();
+        let result = set_interval_fn.call2(&JsValue::NULL, closure.as_ref(), &JsValue::from(ms))
+            .unwrap_or(JsValue::from(0));
+        result.as_f64().unwrap_or(0.0) as i32
+    }
+    
+    /// Clear a JS interval
+    fn clear_interval(id: i32) {
+        let global = js_sys::global();
+        if let Ok(clear) = js_sys::Reflect::get(&global, &JsValue::from_str("clearInterval")) {
+            let clear_fn: js_sys::Function = clear.unchecked_into();
+            let _ = clear_fn.call1(&JsValue::NULL, &JsValue::from(id));
+        }
+    }
+    
+    /// Set up a JS timeout and return its ID
+    fn set_timeout(closure: &Closure<dyn FnMut()>, ms: i32) -> i32 {
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .expect("setTimeout should exist");
+        let set_timeout_fn: js_sys::Function = set_timeout.unchecked_into();
+        let result = set_timeout_fn.call2(&JsValue::NULL, closure.as_ref(), &JsValue::from(ms))
+            .unwrap_or(JsValue::from(0));
+        result.as_f64().unwrap_or(0.0) as i32
+    }
+    
+    /// Schedule a reconnection attempt
+    fn schedule_reconnect(
+        state: Rc<RefCell<SharedState>>,
+        transport_rc: Rc<RefCell<Option<WebTransport>>>,
+        writer_rc: Rc<RefCell<Option<WritableStreamDefaultWriter>>>,
+        url: String,
+        cert_hash: Option<String>,
+        mac: [u8; 6],
+        delay_ms: i32,
+    ) {
+        console_log(&format!("[WebTransport] Scheduling reconnect in {}ms...", delay_ms));
+        
+        let closure = Closure::once(move || {
+            // Create a temporary backend to trigger reconnection
+            let backend = WebTransportBackend {
+                url: url.clone(),
+                cert_hash: cert_hash.clone(),
+                mac,
+                transport: transport_rc,
+                writer: writer_rc,
+                state,
+            };
+            backend.start_connection();
+        });
+        
+        set_timeout(&closure, delay_ms);
+        closure.forget();
+    }
+    
+    /// Setup visibility change handler to send heartbeat when tab becomes visible
+    fn setup_visibility_handler(
+        writer: WritableStreamDefaultWriter,
+        state: Rc<RefCell<SharedState>>,
+        generation: u32,
+    ) {
+        let closure = Closure::wrap(Box::new(move || {
+            // Check if document is visible
+            let global = js_sys::global();
+            if let Ok(document) = js_sys::Reflect::get(&global, &JsValue::from_str("document")) {
+                if let Ok(hidden) = js_sys::Reflect::get(&document, &JsValue::from_str("hidden")) {
+                    if !hidden.as_bool().unwrap_or(true) {
+                        // Tab became visible - send immediate heartbeat
+                        if state.borrow().connection_generation == generation {
+                            console_log("[WebTransport] Tab visible - sending immediate heartbeat");
+                            let heartbeat = make_heartbeat_message();
+                            let array = Uint8Array::from(&heartbeat[..]);
+                            let _ = writer.write_with_chunk(&array);
+                        }
+                    }
+                }
+            }
+        }) as Box<dyn Fn()>);
+        
+        // Add event listener
+        let global = js_sys::global();
+        if let Ok(document) = js_sys::Reflect::get(&global, &JsValue::from_str("document")) {
+            if let Ok(add_listener) = js_sys::Reflect::get(&document, &JsValue::from_str("addEventListener")) {
+                let add_fn: js_sys::Function = add_listener.unchecked_into();
+                let _ = add_fn.call2(&document, &JsValue::from_str("visibilitychange"), closure.as_ref());
+            }
+        }
+        closure.forget();
+    }
 
     impl NetworkBackend for WebTransportBackend {
         fn init(&mut self) -> Result<(), String> {
             console_log(&format!("[WebTransport] Initializing connection to {}", self.url));
-            
-            let options = WebTransportOptions::new();
-
-            if let Some(hash_hex) = &self.cert_hash {
-                console_log(&format!("[WebTransport] Using certificate hash: {}", hash_hex));
-                let bytes = hex::decode(hash_hex.replace(":", "")).map_err(|e| {
-                    console_error(&format!("[WebTransport] Invalid hex hash: {}", e));
-                    e.to_string()
-                })?;
-                let array = Uint8Array::from(&bytes[..]);
-
-                let hash_obj = WebTransportHash::new();
-                hash_obj.set_algorithm("sha-256");
-                hash_obj.set_value(&array);
-
-                let hashes = Array::new();
-                hashes.push(&hash_obj);
-                options.set_server_certificate_hashes(&hashes);
-            } else {
-                console_log("[WebTransport] No certificate hash provided (using system trust)");
-            }
-
-            let transport = match WebTransport::new_with_options(&self.url, &options) {
-                Ok(t) => t,
-                Err(e) => {
-                    let msg = format!("Failed to create WebTransport: {:?}", e);
-                    console_error(&format!("[WebTransport] {}", msg));
-                    return Err(msg);
-                }
-            };
-            console_log("[WebTransport] Transport object created, waiting for connection...");
-
-            let rx_queue = self.rx_queue.clone();
-            let registered = self.registered.clone();
-            let assigned_ip = self.assigned_ip.clone();
-            let mac = self.mac;
-            let url = self.url.clone();
-
-            // Setup writer first so we can send registration
-            let datagrams = transport.datagrams();
-            let writable = datagrams.writable();
-            let writer = writable.get_writer().map_err(|e| format!("{:?}", e))?;
-
-            let writer_clone = writer.clone();
-            let transport_clone = transport.clone();
-            let ready_promise = transport.ready();
-
-            wasm_bindgen_futures::spawn_local(async move {
-                console_log(&format!("[WebTransport] Connecting to {}...", url));
-                
-                match JsFuture::from(ready_promise).await {
-                    Ok(_) => {
-                        console_log("[WebTransport] Connected successfully!");
-
-                        // Send registration message
-                        let register_msg = make_register_message(&mac);
-                        let array = Uint8Array::from(&register_msg[..]);
-                        let promise = writer_clone.write_with_chunk(&array);
-                        if let Err(e) = JsFuture::from(promise).await {
-                            console_error(&format!("[WebTransport] Failed to send registration: {:?}", e));
-                            return;
-                        }
-                        console_log(&format!(
-                            "[WebTransport] Registration sent, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                        ));
-
-                        // Spawn heartbeat sender using JS setInterval via global scope
-                        let writer_heartbeat = writer_clone.clone();
-                        let heartbeat_closure = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
-                            let heartbeat = make_heartbeat_message();
-                            let array = Uint8Array::from(&heartbeat[..]);
-                            let _ = writer_heartbeat.write_with_chunk(&array);
-                            log::trace!("[WebTransport] Heartbeat sent");
-                        }) as Box<dyn Fn()>);
-                        
-                        // Use global setInterval via js_sys
-                        let global = js_sys::global();
-                        let set_interval = js_sys::Reflect::get(&global, &JsValue::from_str("setInterval"))
-                            .expect("setInterval should exist");
-                        let set_interval_fn: js_sys::Function = set_interval.unchecked_into();
-                        let _ = set_interval_fn.call2(
-                            &JsValue::NULL,
-                            heartbeat_closure.as_ref(),
-                            &JsValue::from((HEARTBEAT_INTERVAL_SECS * 1000) as i32),
-                        );
-                        heartbeat_closure.forget(); // Let the closure live forever
-
-                        // Setup reader
-                        let datagrams = transport_clone.datagrams();
-                        let readable = datagrams.readable();
-                        let reader: ReadableStreamDefaultReader =
-                            readable.get_reader().unchecked_into();
-
-                        loop {
-                            match JsFuture::from(reader.read()).await {
-                                Ok(result) => {
-                                    let done = js_sys::Reflect::get(
-                                        &result,
-                                        &JsValue::from_str("done"),
-                                    )
-                                    .unwrap()
-                                    .as_bool()
-                                    .unwrap();
-                                    if done {
-                                        log::info!("WebTransport reader done");
-                                        break;
-                                    }
-                                    let value = js_sys::Reflect::get(
-                                        &result,
-                                        &JsValue::from_str("value"),
-                                    )
-                                    .unwrap();
-                                    let array = Uint8Array::new(&value);
-                                    let data = array.to_vec();
-
-                                    // Check for Assigned message and extract IP
-                                    if !data.is_empty() && data[0] == MSG_TYPE_CONTROL {
-                                        if let Ok(json_str) = std::str::from_utf8(&data[1..]) {
-                                            if json_str.contains("\"type\":\"Assigned\"") {
-                                                *registered.borrow_mut() = true;
-                                                
-                                                // Parse IP from JSON
-                                                if let Some(ip) = parse_ip_from_json(json_str) {
-                                                    *assigned_ip.borrow_mut() = Some(ip);
-                                                    console_log(&format!(
-                                                        "[WebTransport] IP Assigned: {}.{}.{}.{}",
-                                                        ip[0], ip[1], ip[2], ip[3]
-                                                    ));
-                                                }
-                                                
-                                                console_log(&format!(
-                                                    "[WebTransport] Registered with relay: {}",
-                                                    json_str
-                                                ));
-                                            } else if json_str.contains("\"type\":\"HeartbeatAck\"") {
-                                                // Heartbeat acknowledged - connection is alive
-                                            } else if json_str.contains("\"type\":\"Error\"") {
-                                                console_error(&format!("[WebTransport] Relay error: {}", json_str));
-                                            }
-                                        }
-                                    }
-
-                                    // Decode and queue Ethernet frames
-                                    if let Some(ethernet_frame) = decode_message(&data) {
-                                        rx_queue.borrow_mut().push_back(ethernet_frame);
-                                    }
-                                }
-                                Err(e) => {
-                                    console_error(&format!("[WebTransport] Read error: {:?}", e));
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        console_error(&format!("[WebTransport] Failed to connect: {:?}", e));
-                    }
-                }
-            });
-
-            self.transport = Some(transport);
-            self.writer = Some(writer);
-
+            self.start_connection();
             Ok(())
         }
 
         fn recv(&mut self) -> Result<Option<Vec<u8>>, String> {
-            Ok(self.rx_queue.borrow_mut().pop_front())
+            Ok(self.state.borrow_mut().rx_queue.pop_front())
         }
 
         fn send(&self, buf: &[u8]) -> Result<(), String> {
-            if let Some(writer) = &self.writer {
+            if let Some(writer) = self.writer.borrow().as_ref() {
                 // Frame the Ethernet data with the protocol prefix
                 let framed = encode_data_frame(buf);
                 let array = Uint8Array::from(&framed[..]);
@@ -618,7 +800,7 @@ mod wasm {
         }
         
         fn get_assigned_ip(&self) -> Option<[u8; 4]> {
-            *self.assigned_ip.borrow()
+            self.state.borrow().assigned_ip
         }
     }
 }

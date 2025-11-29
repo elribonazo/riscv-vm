@@ -22,6 +22,15 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use wtransport::{Endpoint, Identity, ServerConfig};
 
+/// QUIC keep-alive interval in seconds.
+/// Server sends PING frames at this interval to keep connections alive.
+/// This is critical for browser tabs that go to background and can't send heartbeats.
+const QUIC_KEEP_ALIVE_SECS: u64 = 15;
+
+/// Maximum QUIC idle timeout in seconds.
+/// Connection is closed if no activity for this duration.
+const QUIC_MAX_IDLE_TIMEOUT_SECS: u64 = 180;
+
 use crate::hub::{Hub, PeerMessage};
 use crate::peer::PeerId;
 use crate::protocol::{encode_data_frame, ControlMessage, MSG_TYPE_CONTROL};
@@ -55,8 +64,8 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     heartbeat_interval: u64,
 
-    /// Peer timeout in seconds
-    #[arg(long, default_value_t = 90)]
+    /// Peer timeout in seconds (increased for browser backgrounding tolerance)
+    #[arg(long, default_value_t = 150)]
     peer_timeout: u64,
 }
 
@@ -140,9 +149,21 @@ async fn main() -> Result<()> {
     let config = ServerConfig::builder()
         .with_bind_address(socket_addr)
         .with_identity(identity)
+        // CRITICAL: Server-side keep-alive to prevent connections from timing out
+        // when browser tabs go to background and can't send heartbeats.
+        // The server will send QUIC PING frames every QUIC_KEEP_ALIVE_SECS seconds.
+        .keep_alive_interval(Some(Duration::from_secs(QUIC_KEEP_ALIVE_SECS)))
+        // Maximum time a connection can be idle (no data or keep-alive)
+        .max_idle_timeout(Some(Duration::from_secs(QUIC_MAX_IDLE_TIMEOUT_SECS)))
+        .expect("Invalid idle timeout")
         .build();
 
     let endpoint = Endpoint::server(config)?;
+    
+    info!(
+        "QUIC keep-alive: {}s, max idle timeout: {}s",
+        QUIC_KEEP_ALIVE_SECS, QUIC_MAX_IDLE_TIMEOUT_SECS
+    );
 
     info!("Listening on https://{}:{}", args.bind, args.port);
 
