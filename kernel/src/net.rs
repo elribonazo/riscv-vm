@@ -89,24 +89,31 @@ impl NetState {
         device.init()?;
         
         // --- IP ADDRESS DISCOVERY ---
-        // Wait up to ~2 seconds for an IP assignment from the host/relay
-        // The VM runs much faster than the network handshake
+        // Wait for an IP assignment from the host/relay
+        // In WASM, async tasks need the JS event loop to run, so we use many
+        // short iterations to give the browser more chances to process events
         let mut my_ip = DEFAULT_IP_ADDR; // Fallback default
+        let mut got_ip = false;
         
         crate::uart::write_str("    \x1b[0;90m├─\x1b[0m Waiting for IP assignment");
-        for _ in 0..20 {
+        // 100 iterations with shorter delays = more chances for async tasks in WASM
+        for i in 0..100 {
             if let Some(ip_bytes) = device.get_config_ip() {
                 my_ip = Ipv4Address::from_bytes(&ip_bytes);
+                got_ip = true;
                 crate::uart::write_line(" \x1b[1;32m[OK]\x1b[0m");
                 break;
             }
-            crate::uart::write_str(".");
-            // Busy wait delay (~100ms equivalent at VM speed)
-            for _ in 0..1_000_000 { core::hint::spin_loop(); } 
+            // Print a dot every 5 iterations to show progress
+            if i % 5 == 0 {
+                crate::uart::write_str(".");
+            }
+            // Shorter delay to allow more frequent checks and JS event loop to run in WASM
+            for _ in 0..200_000 { core::hint::spin_loop(); } 
         }
         
         // If we didn't get an IP, show fallback message
-        if my_ip == DEFAULT_IP_ADDR {
+        if !got_ip {
             crate::uart::write_line(" \x1b[1;33m[using default]\x1b[0m");
         }
         
