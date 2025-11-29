@@ -1,3 +1,13 @@
+## 0.0.12 (2025-11-29)
+
+### 🩹 Fixes
+
+- generate scripts Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([77d21a6](https://github.com/elribonazo/riscv-vm/commit/77d21a6))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.11 (2025-11-29)
 
 ### 🩹 Fixes
