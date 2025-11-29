@@ -234,7 +234,7 @@ mod native {
                         let endpoint = match Endpoint::client(config) {
                             Ok(ep) => ep,
                             Err(e) => {
-                                eprintln!("[WebTransport] ERROR: Failed to create endpoint: {}", e);
+                                eprintln!("[WebTransport] ERROR: Failed to provision endpoint: {}", e);
                                 tokio::time::sleep(Duration::from_secs(reconnect_delay)).await;
                                 reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY_SECS);
                                 continue;
