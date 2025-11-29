@@ -1216,20 +1216,17 @@ fn execute_command(cmd: &[u8], args: &[u8]) {
 
 /// Run a script from its bytes
 fn run_script_bytes(bytes: &[u8], args: &str) {
-    if let Ok(script) = core::str::from_utf8(bytes) {
-        match scripting::execute_script(script, args) {
-            Ok(output) => {
-                if !output.is_empty() {
-                    out_str(&output);
-                }
-            }
-            Err(e) => {
-                out_str("\x1b[1;31mScript error:\x1b[0m ");
-                out_line(&e);
+    let script = unsafe { core::str::from_utf8_unchecked(bytes) };
+    match scripting::execute_script(script, args) {
+        Ok(output) => {
+            if !output.is_empty() {
+                out_str(&output);
             }
         }
-    } else {
-        out_line("\x1b[1;31mError:\x1b[0m Invalid UTF-8 in script file");
+        Err(e) => {
+            out_str("\x1b[1;31mScript error:\x1b[0m ");
+            out_line(&e);
+        }
     }
 }
 

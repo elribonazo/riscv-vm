@@ -154,9 +154,6 @@ impl VirtioBlock {
             let head_idx_addr = self.queue_avail.wrapping_add(4).wrapping_add(ring_slot * 2);
             let head_desc_idx = dram.load_16(self.phys_to_offset(head_idx_addr)?)? as u16;
 
-            if self.debug {
-                 eprintln!("[VirtioBlock] Processing queue idx={} head_desc={}", self.last_avail_idx, head_desc_idx);
-            }
 
             let desc_idx = head_desc_idx;
 
@@ -168,9 +165,7 @@ impl VirtioBlock {
             let mut next_desc_idx = dram.load_16(off_desc_addr0 + 14)?;
 
             if header_len < 16 {
-                if self.debug {
-                     eprintln!("[VirtioBlock] Header too short: {}", header_len);
-                }
+          
                 // Consume malformed descriptor to avoid loop
                 self.last_avail_idx = self.last_avail_idx.wrapping_add(1);
                 processed_any = true;
@@ -182,9 +177,6 @@ impl VirtioBlock {
             let _blk_reserved = dram.load_32(off_header_addr + 4)?;
             let blk_sector = dram.load_64(off_header_addr + 8)?;
 
-            if self.debug {
-                 eprintln!("[VirtioBlock] Request type={} sector={}", blk_type, blk_sector);
-            }
 
             let mut data_len_done: u32 = 0;
 
@@ -200,7 +192,8 @@ impl VirtioBlock {
                     let offset = blk_sector * 512;
                     if offset + (data_len as u64) <= self.disk.len() as u64 {
                         let slice = &self.disk[offset as usize..(offset as usize + data_len as usize)];
-                        dram.write_bytes(self.phys_to_offset(data_addr)?, slice)?;
+                        let dram_off = self.phys_to_offset(data_addr)?;
+                        dram.write_bytes(dram_off, slice)?;
                         data_len_done = data_len as u32;
                     }
                 } else if blk_type == 1 { // OUT (Write)

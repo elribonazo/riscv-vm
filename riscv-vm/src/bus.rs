@@ -117,9 +117,6 @@ impl SystemBus {
             let irq = crate::plic::VIRTIO0_IRQ + i as u32;
             if irq < 32 { // PLIC limit
                 let intr = dev.is_interrupting();
-                if intr && log::log_enabled!(log::Level::Trace) {
-                     log::trace!("[Bus] VirtIO dev {} interrupting (irq {})", i, irq);
-                }
                 self.plic.set_source_level(irq, intr);
             }
         }
@@ -194,7 +191,8 @@ impl Bus for SystemBus {
         }
 
         if let Some(off) = self.dram.offset(addr) {
-            return Ok(self.dram.data[off]);
+            let val = self.dram.data[off];
+            return Ok(val);
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -318,13 +316,6 @@ impl Bus for SystemBus {
 
         if let Some((idx, offset)) = self.get_virtio_device(addr) {
             let val = self.virtio_devices[idx].read(offset).map_err(|_| Trap::LoadAccessFault(addr))?;
-            // Debug: Log VirtIO config space reads (offset >= 0x100) for network device
-            #[cfg(target_arch = "wasm32")]
-            if offset >= 0x100 && self.virtio_devices[idx].device_id() == 1 {
-                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
-                    &format!("[Bus] VirtIO read addr={:#x} idx={} offset={:#x} val={:#x}", 
-                        addr, idx, offset, val)));
-            }
             return Ok(val as u32);
         }
         
@@ -350,7 +341,8 @@ impl Bus for SystemBus {
                 return Err(Trap::LoadAccessFault(addr));
             }
             let bytes = &self.dram.data[off..off + 8];
-            return Ok(u64::from_le_bytes(bytes.try_into().unwrap()));
+            let val = u64::from_le_bytes(bytes.try_into().unwrap());
+            return Ok(val);
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
