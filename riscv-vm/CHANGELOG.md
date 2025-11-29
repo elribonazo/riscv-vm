@@ -1,3 +1,13 @@
+## 0.0.24 (2025-11-29)
+
+### 🩹 Fixes
+
+- riscvm uart output Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([d763284](https://github.com/elribonazo/riscv-vm/commit/d763284))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.23 (2025-11-29)
 
 ### 🩹 Fixes
