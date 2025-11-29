@@ -30,6 +30,138 @@ struct PingState {
 static mut BLK_DEV: Option<virtio_blk::VirtioBlock> = None;
 static mut PING_STATE: Option<PingState> = None;
 
+// ─── OUTPUT CAPTURE FOR REDIRECTION ────────────────────────────────────────────
+const OUTPUT_BUFFER_SIZE: usize = 4096;
+static mut OUTPUT_BUFFER: [u8; OUTPUT_BUFFER_SIZE] = [0u8; OUTPUT_BUFFER_SIZE];
+static mut OUTPUT_LEN: usize = 0;
+static mut CAPTURE_MODE: bool = false;
+
+/// Start capturing output to the buffer
+fn output_capture_start() {
+    unsafe {
+        CAPTURE_MODE = true;
+        OUTPUT_LEN = 0;
+    }
+}
+
+/// Stop capturing and return the captured bytes
+fn output_capture_stop() -> &'static [u8] {
+    unsafe {
+        CAPTURE_MODE = false;
+        &OUTPUT_BUFFER[..OUTPUT_LEN]
+    }
+}
+
+/// Write a string - respects capture mode
+fn out_str(s: &str) {
+    unsafe {
+        if CAPTURE_MODE {
+            for &b in s.as_bytes() {
+                if OUTPUT_LEN < OUTPUT_BUFFER_SIZE {
+                    OUTPUT_BUFFER[OUTPUT_LEN] = b;
+                    OUTPUT_LEN += 1;
+                }
+            }
+        } else {
+            uart::write_str(s);
+        }
+    }
+}
+
+/// Write a string with newline - respects capture mode
+fn out_line(s: &str) {
+    out_str(s);
+    out_str("\n");
+}
+
+/// Write bytes - respects capture mode
+fn out_bytes(bytes: &[u8]) {
+    unsafe {
+        if CAPTURE_MODE {
+            for &b in bytes {
+                if OUTPUT_LEN < OUTPUT_BUFFER_SIZE {
+                    OUTPUT_BUFFER[OUTPUT_LEN] = b;
+                    OUTPUT_LEN += 1;
+                }
+            }
+        } else {
+            uart::write_bytes(bytes);
+        }
+    }
+}
+
+/// Write u64 - respects capture mode
+fn out_u64(n: u64) {
+    unsafe {
+        if CAPTURE_MODE {
+            if n == 0 {
+                if OUTPUT_LEN < OUTPUT_BUFFER_SIZE {
+                    OUTPUT_BUFFER[OUTPUT_LEN] = b'0';
+                    OUTPUT_LEN += 1;
+                }
+                return;
+            }
+            let mut buf = [0u8; 20];
+            let mut i = 0;
+            let mut val = n;
+            while val > 0 && i < buf.len() {
+                buf[i] = b'0' + (val % 10) as u8;
+                val /= 10;
+                i += 1;
+            }
+            while i > 0 {
+                i -= 1;
+                if OUTPUT_LEN < OUTPUT_BUFFER_SIZE {
+                    OUTPUT_BUFFER[OUTPUT_LEN] = buf[i];
+                    OUTPUT_LEN += 1;
+                }
+            }
+        } else {
+            uart::write_u64(n);
+        }
+    }
+}
+
+/// Write hex - respects capture mode  
+fn out_hex(n: u64) {
+    unsafe {
+        if CAPTURE_MODE {
+            let hex_digits = b"0123456789abcdef";
+            if n == 0 {
+                if OUTPUT_LEN < OUTPUT_BUFFER_SIZE {
+                    OUTPUT_BUFFER[OUTPUT_LEN] = b'0';
+                    OUTPUT_LEN += 1;
+                }
+                return;
+            }
+            let mut buf = [0u8; 16];
+            let mut i = 0;
+            let mut val = n;
+            while val > 0 && i < buf.len() {
+                buf[i] = hex_digits[(val & 0xf) as usize];
+                val >>= 4;
+                i += 1;
+            }
+            while i > 0 {
+                i -= 1;
+                if OUTPUT_LEN < OUTPUT_BUFFER_SIZE {
+                    OUTPUT_BUFFER[OUTPUT_LEN] = buf[i];
+                    OUTPUT_LEN += 1;
+                }
+            }
+        } else {
+            uart::write_hex(n);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RedirectMode {
+    None,
+    Overwrite, // >
+    Append,    // >>
+}
+
 /// Read current time in milliseconds from CLINT mtime register
 fn get_time_ms() -> i64 {
     let mtime = unsafe { core::ptr::read_volatile(CLINT_MTIME as *const u64) };
@@ -132,6 +264,17 @@ fn main() -> ! {
     let mut len = 0usize;
     let mut count: usize = 0;
     let mut last_newline: u8 = 0; // Track last newline char to handle \r\n sequences
+    
+    // Command history
+    const HISTORY_SIZE: usize = 16;
+    let mut history: [[u8; 128]; HISTORY_SIZE] = [[0u8; 128]; HISTORY_SIZE];
+    let mut history_lens: [usize; HISTORY_SIZE] = [0; HISTORY_SIZE];
+    let mut history_count: usize = 0;  // Total commands stored
+    let mut history_pos: usize = 0;    // Current position when navigating (0 = newest)
+    let mut browsing_history: bool = false;
+    
+    // Escape sequence state
+    let mut esc_state: u8 = 0; // 0 = normal, 1 = got ESC, 2 = got ESC[
 
     loop {
         // Poll network stack
@@ -143,8 +286,93 @@ fn main() -> ! {
         if byte == 0 {
             continue;
         }
+        
+        // Handle escape sequences for arrow keys
+        if esc_state == 1 {
+            if byte == b'[' {
+                esc_state = 2;
+                continue;
+            } else {
+                esc_state = 0;
+                // Fall through to handle the byte normally
+            }
+        } else if esc_state == 2 {
+            esc_state = 0;
+            match byte {
+                b'A' => {
+                    // Up arrow - go to older command
+                    if history_count > 0 {
+                        let max_pos = if history_count < HISTORY_SIZE { history_count } else { HISTORY_SIZE };
+                        if history_pos < max_pos {
+                            if !browsing_history {
+                                browsing_history = true;
+                                history_pos = 0;
+                            }
+                            if history_pos < max_pos {
+                                // Clear current line
+                                clear_input_line(len);
+                                
+                                // Get command from history (0 = most recent)
+                                let idx = ((history_count - 1 - history_pos) % HISTORY_SIZE) as usize;
+                                len = history_lens[idx];
+                                buffer[..len].copy_from_slice(&history[idx][..len]);
+                                
+                                // Display the command
+                                uart::write_bytes(&buffer[..len]);
+                                
+                                if history_pos + 1 < max_pos {
+                                    history_pos += 1;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                b'B' => {
+                    // Down arrow - go to newer command
+                    if browsing_history && history_pos > 0 {
+                        history_pos -= 1;
+                        
+                        // Clear current line
+                        clear_input_line(len);
+                        
+                        if history_pos == 0 {
+                            // Back to empty line (current input)
+                            browsing_history = false;
+                            len = 0;
+                        } else {
+                            // Get command from history
+                            let idx = ((history_count - history_pos) % HISTORY_SIZE) as usize;
+                            len = history_lens[idx];
+                            buffer[..len].copy_from_slice(&history[idx][..len]);
+                            
+                            // Display the command
+                            uart::write_bytes(&buffer[..len]);
+                        }
+                    } else if browsing_history {
+                        // At position 0, clear and go back to empty
+                        clear_input_line(len);
+                        browsing_history = false;
+                        len = 0;
+                    }
+                    continue;
+                }
+                b'C' | b'D' => {
+                    // Right/Left arrow - ignore for now
+                    continue;
+                }
+                _ => {
+                    // Unknown escape sequence, ignore
+                    continue;
+                }
+            }
+        }
 
         match byte {
+            0x1b => {
+                // ESC - start of escape sequence
+                esc_state = 1;
+            }
             b'\r' | b'\n' => {
                 // Skip second char of \r\n or \n\r sequence
                 if (last_newline == b'\r' && byte == b'\n') || (last_newline == b'\n' && byte == b'\r') {
@@ -154,9 +382,20 @@ fn main() -> ! {
                 last_newline = byte;
                 uart::write_line("");  // Echo the newline
                 uart::write_line("");  // Add blank line before command output
+                
+                // Save to history if non-empty
+                if len > 0 {
+                    let idx = history_count % HISTORY_SIZE;
+                    history[idx][..len].copy_from_slice(&buffer[..len]);
+                    history_lens[idx] = len;
+                    history_count += 1;
+                }
+                
                 handle_line(&buffer, len, &mut count);
                 print_prompt();
                 len = 0;
+                browsing_history = false;
+                history_pos = 0;
             }
             // Backspace / Delete
             8 | 0x7f => {
@@ -176,6 +415,14 @@ fn main() -> ! {
                 }
             }
         }
+    }
+}
+
+/// Clear the current input line on the terminal
+fn clear_input_line(len: usize) {
+    // Move cursor back and clear each character
+    for _ in 0..len {
+        uart::write_str("\u{8} \u{8}");
     }
 }
 
@@ -320,6 +567,45 @@ fn print_prompt() {
     uart::write_str("\x1b[1;35mrisk-v\x1b[0m:\x1b[1;34m~\x1b[0m$ ");
 }
 
+/// Parse a command line for redirection operators
+/// Returns: (command_part, redirect_mode, filename)
+fn parse_redirection(line: &[u8]) -> (&[u8], RedirectMode, &[u8]) {
+    // Look for >> first (must check before >)
+    for i in 0..line.len().saturating_sub(1) {
+        if line[i] == b'>' && line[i + 1] == b'>' {
+            let cmd_part = trim_bytes(&line[..i]);
+            let file_part = trim_bytes(&line[i + 2..]);
+            return (cmd_part, RedirectMode::Append, file_part);
+        }
+    }
+    
+    // Look for single >
+    for i in 0..line.len() {
+        if line[i] == b'>' {
+            let cmd_part = trim_bytes(&line[..i]);
+            let file_part = trim_bytes(&line[i + 1..]);
+            return (cmd_part, RedirectMode::Overwrite, file_part);
+        }
+    }
+    
+    (line, RedirectMode::None, &[])
+}
+
+/// Trim whitespace from byte slice
+fn trim_bytes(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    
+    while start < end && (bytes[start] == b' ' || bytes[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+        end -= 1;
+    }
+    
+    &bytes[start..end]
+}
+
 fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
     // Trim leading/trailing whitespace (spaces and tabs only)
     let mut start = 0;
@@ -333,12 +619,21 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
     }
 
     if start >= end {
-        // Empty line -> show help
-        show_help();
+        // Empty line -> do nothing
         return;
     }
 
-    let line = &buffer[start..end];
+    let full_line = &buffer[start..end];
+    
+    // Parse for redirection
+    let (line, redirect_mode, redirect_file) = parse_redirection(full_line);
+    
+    // Validate redirection target
+    if redirect_mode != RedirectMode::None && redirect_file.is_empty() {
+        uart::write_line("");
+        uart::write_line("\x1b[1;31mError:\x1b[0m Missing filename for redirection");
+        return;
+    }
 
     // Split into command and arguments (first whitespace)
     let mut i = 0;
@@ -353,14 +648,72 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
     }
     let args = &line[arg_start..];
 
-    // Print newline before command output
-    uart::write_line("");
+    // Print newline before command output (only if not redirecting)
+    if redirect_mode == RedirectMode::None {
+        uart::write_line("");
+    }
+    
+    // Start capturing if redirecting
+    if redirect_mode != RedirectMode::None {
+        output_capture_start();
+    }
 
-    if eq_cmd(cmd, b"help") {
-        show_help();
+    // Execute the command
+    execute_command(cmd, args);
+    
+    // Handle redirection output
+    if redirect_mode != RedirectMode::None {
+        let output = output_capture_stop();
+        
+        if let Ok(filename) = core::str::from_utf8(redirect_file) {
+            let filename = filename.trim();
+            
+            unsafe {
+                if let (Some(fs), Some(dev)) = (FS_STATE.as_mut(), BLK_DEV.as_mut()) {
+                    let final_data = if redirect_mode == RedirectMode::Append {
+                        // Read existing file content and append
+                        let mut combined = match fs.read_file(dev, filename) {
+                            Some(existing) => existing,
+                            None => Vec::new(),
+                        };
+                        combined.extend_from_slice(output);
+                        combined
+                    } else {
+                        // Overwrite mode - just use new output
+                        Vec::from(output)
+                    };
+                    
+                    match fs.write_file(dev, filename, &final_data) {
+                        Ok(()) => {
+                            uart::write_line("");
+                            uart::write_str("\x1b[1;32m✓\x1b[0m Output written to ");
+                            uart::write_line(filename);
+                        }
+                        Err(e) => {
+                            uart::write_line("");
+                            uart::write_str("\x1b[1;31mError:\x1b[0m Failed to write to file: ");
+                            uart::write_line(e);
+                        }
+                    }
+                } else {
+                    uart::write_line("");
+                    uart::write_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
+                }
+            }
+        } else {
+            uart::write_line("");
+            uart::write_line("\x1b[1;31mError:\x1b[0m Invalid filename");
+        }
+    }
+}
+
+/// Execute a command (separated for cleaner redirection handling)
+fn execute_command(cmd: &[u8], args: &[u8]) {
+    if eq_cmd(cmd, b"echo") {
+        cmd_echo(args);
     } else if eq_cmd(cmd, b"clear") {
         for _ in 0..20 {
-            uart::write_line("");
+            out_line("");
         }
     } else if eq_cmd(cmd, b"ip") {
         cmd_ip(args);
@@ -372,66 +725,117 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
         cmd_netstat();
     } else if eq_cmd(cmd, b"shutdown") || eq_cmd(cmd, b"poweroff") {
         cmd_shutdown();
-    }else if eq_cmd(cmd, b"ls") {
+    } else if eq_cmd(cmd, b"ls") {
+        cmd_ls();
+    } else if eq_cmd(cmd, b"cat") {
+        cmd_cat(args);
+    } else if eq_cmd(cmd, b"write") {
+        // Basic write: write filename content...
+        let line = core::str::from_utf8(args).unwrap_or("");
+        if let Some((name, data)) = line.split_once(' ') {
             unsafe {
-                if let (Some(fs), Some(dev)) = (FS_STATE.as_ref(), BLK_DEV.as_mut()) {
-                    fs.ls(dev);
-                }
-            }
-        } else if eq_cmd(cmd, b"cat") {
-            let filename = core::str::from_utf8(args).unwrap_or("").trim();
-            unsafe {
-                if let (Some(fs), Some(dev)) = (FS_STATE.as_ref(), BLK_DEV.as_mut()) {
-                    match fs.read_file(dev, filename) {
-                        Some(data) => if let Ok(s) = core::str::from_utf8(&data) { uart::write_line(s); },
-                        None => uart::write_line("File not found"),
+                if let (Some(fs), Some(dev)) = (FS_STATE.as_mut(), BLK_DEV.as_mut()) {
+                    if fs.write_file(dev, name, data.as_bytes()).is_ok() {
+                        out_line("Written.");
+                    } else {
+                        out_line("Write failed.");
                     }
                 }
             }
-        } else if eq_cmd(cmd, b"write") {
-            // Basic write: write filename content...
-            let line = core::str::from_utf8(args).unwrap_or("");
-            if let Some((name, data)) = line.split_once(' ') {
-                unsafe {
-                    if let (Some(fs), Some(dev)) = (FS_STATE.as_mut(), BLK_DEV.as_mut()) {
-                        if fs.write_file(dev, name, data.as_bytes()).is_ok() {
-                            uart::write_line("Written.");
-                        } else {
-                            uart::write_line("Write failed.");
-                        }
-                    }
-                }
-            }
+        }
+    } else if eq_cmd(cmd, b"memstats") {
+        cmd_memstats();
+    } else if eq_cmd(cmd, b"memtest") {
+        cmd_memtest(args);
+    } else if eq_cmd(cmd, b"alloc") {
+        cmd_alloc(args);
+    } else if eq_cmd(cmd, b"readsec") {
+        cmd_readsec(args);
     } else {
-        uart::write_str("Unknown command: ");
-        uart::write_bytes(cmd);
-        uart::write_line("");
+        out_str("Unknown command: ");
+        out_bytes(cmd);
+        out_line("");
     }
 }
 
-fn show_help() {
-    uart::write_line("");
-    uart::write_line("\x1b[1;36m╭──────────────────────────────────────────────────────────────────────────╮\x1b[0m");
-    uart::write_line("\x1b[1;36m│\x1b[0m                     \x1b[1;97mRISK-V OS Command Reference\x1b[0m                         \x1b[1;36m│\x1b[0m");
-    uart::write_line("\x1b[1;36m╰──────────────────────────────────────────────────────────────────────────╯\x1b[0m");
-    uart::write_line("");
-    uart::write_line("\x1b[1;33m  System Commands:\x1b[0m");
-    uart::write_line("    \x1b[1;32mhelp\x1b[0m              Show this help message");
-    uart::write_line("    \x1b[1;32mclear\x1b[0m             Clear the screen");
-    uart::write_line("    \x1b[1;32mshutdown\x1b[0m          Power off the virtual machine");
-    uart::write_line("");
-    uart::write_line("\x1b[1;33m  Memory Commands:\x1b[0m");
-    uart::write_line("    \x1b[1;32mmemstats\x1b[0m          Show heap memory statistics");
-    uart::write_line("    \x1b[1;32mmemtest\x1b[0m \x1b[0;90m[n]\x1b[0m       Run n allocation/deallocation cycles");
-    uart::write_line("    \x1b[1;32malloc\x1b[0m \x1b[0;90m<bytes>\x1b[0m     Allocate bytes (for testing)");
-    uart::write_line("");
-    uart::write_line("\x1b[1;33m  Network Commands:\x1b[0m");
-    uart::write_line("    \x1b[1;32mip addr\x1b[0m           Show network interface configuration");
-    uart::write_line("    \x1b[1;32mping\x1b[0m \x1b[0;90m<ip|host>\x1b[0m    Send ICMP echo request");
-    uart::write_line("    \x1b[1;32mnslookup\x1b[0m \x1b[0;90m<host>\x1b[0m   DNS lookup (resolve hostname to IP)");
-    uart::write_line("    \x1b[1;32mnetstat\x1b[0m           Show network status");
-    uart::write_line("");
+/// Echo command - print arguments to output
+fn cmd_echo(args: &[u8]) {
+    out_bytes(args);
+    out_line("");
 }
+
+/// List files command (wrapper for redirection support)
+fn cmd_ls() {
+    unsafe {
+        if let (Some(_fs), Some(dev)) = (FS_STATE.as_ref(), BLK_DEV.as_mut()) {
+            out_line("SIZE        NAME");
+            out_line("----------  --------------------");
+            
+            // We need to iterate through directory entries
+            let mut buf = [0u8; 512];
+            const SEC_DIR_START: u64 = 65;
+            const SEC_DIR_COUNT: u64 = 64;
+            
+            for i in 0..SEC_DIR_COUNT {
+                if dev.read_sector(SEC_DIR_START + i, &mut buf).is_ok() {
+                    for j in 0..16 {
+                        let offset = j * 32;
+                        if buf[offset] == 0 { continue; }
+                        
+                        // Parse entry
+                        let name_bytes = &buf[offset..offset + 24];
+                        let size = u32::from_le_bytes([
+                            buf[offset + 24],
+                            buf[offset + 25],
+                            buf[offset + 26],
+                            buf[offset + 27],
+                        ]);
+                        
+                        let name_len = name_bytes.iter().position(|&c| c == 0).unwrap_or(24);
+                        
+                        out_u64(size as u64);
+                        if size < 10 { out_str("         "); }
+                        else if size < 100 { out_str("        "); }
+                        else if size < 1000 { out_str("       "); }
+                        else { out_str("      "); }
+                        out_bytes(&name_bytes[..name_len]);
+                        out_line("");
+                    }
+                }
+            }
+        } else {
+            out_line("Filesystem not available");
+        }
+    }
+}
+
+/// Cat command (wrapper for redirection support)
+fn cmd_cat(args: &[u8]) {
+    let filename = core::str::from_utf8(args).unwrap_or("").trim();
+    unsafe {
+        if let (Some(fs), Some(dev)) = (FS_STATE.as_ref(), BLK_DEV.as_mut()) {
+            match fs.read_file(dev, filename) {
+                Some(data) => {
+                    if let Ok(s) = core::str::from_utf8(&data) {
+                        // Don't add extra newline if content already ends with one
+                        if s.ends_with('\n') {
+                            out_str(s);
+                        } else {
+                            out_line(s);
+                        }
+                    } else {
+                        out_bytes(&data);
+                        out_line("");
+                    }
+                }
+                None => out_line("File not found"),
+            }
+        } else {
+            out_line("Filesystem not available");
+        }
+    }
+}
+
 
 fn cmd_alloc(args: &[u8]) {
     // Parse decimal size from args
