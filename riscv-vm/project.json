@@ -17,8 +17,7 @@
         "script": "build"
       },
       "outputs": [
-        "{projectRoot}/build",
-        "{projectRoot}/pkg"
+        "{projectRoot}/build"
       ]
     },
     "lint": {
