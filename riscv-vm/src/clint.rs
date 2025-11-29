@@ -7,10 +7,11 @@ pub const MTIMECMP_OFFSET: u64 = 0x4000;
 
 pub const MAX_HARTS: usize = 8;
 
-/// Time increment per CPU step (in timer ticks).
+/// Time increment per tick (in timer ticks).
+/// This is called every 256 CPU steps (when CPU poll_counter wraps), so we
+/// increment by 256 to maintain the same effective timer rate.
 /// At 10MHz and ~1 instruction per cycle at ~10MHz CPU, this gives roughly real-time.
-/// Adjust for desired timer granularity.
-const MTIME_INCREMENT: u64 = 1;
+const MTIME_INCREMENT: u64 = 256;
 
 pub struct Clint {
     pub msip: [u32; MAX_HARTS],

@@ -174,22 +174,14 @@ impl SystemBus {
             }
         }
     }
-}
-
-impl Bus for SystemBus {
-    fn poll_interrupts(&mut self) -> u64 {
-        self.check_interrupts()
-    }
-
-    fn read8(&mut self, addr: u64) -> Result<u8, Trap> {
+    
+    // Slow path methods for MMIO device access (moved out of hot path)
+    
+    #[cold]
+    fn read8_slow(&mut self, addr: u64) -> Result<u8, Trap> {
         // Test finisher region: reads are harmless and return zero.
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Ok(0);
-        }
-
-        if let Some(off) = self.dram.offset(addr) {
-            let val = self.dram.data[off];
-            return Ok(val);
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -225,22 +217,11 @@ impl Bus for SystemBus {
 
         Err(Trap::LoadAccessFault(addr))
     }
-
-    fn read16(&mut self, addr: u64) -> Result<u16, Trap> {
-        if addr % 2 != 0 {
-            return Err(Trap::LoadAddressMisaligned(addr));
-        }
-
+    
+    #[cold]
+    fn read16_slow(&mut self, addr: u64) -> Result<u16, Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Ok(0);
-        }
-
-        if let Some(off) = self.dram.offset(addr) {
-            if off + 2 > self.dram.data.len() {
-                return Err(Trap::LoadAccessFault(addr));
-            }
-            let bytes = &self.dram.data[off..off + 2];
-            return Ok(u16::from_le_bytes(bytes.try_into().unwrap()));
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -275,22 +256,11 @@ impl Bus for SystemBus {
 
         Err(Trap::LoadAccessFault(addr))
     }
-
-    fn read32(&mut self, addr: u64) -> Result<u32, Trap> {
-        if addr % 4 != 0 {
-            return Err(Trap::LoadAddressMisaligned(addr));
-        }
-
+    
+    #[cold]
+    fn read32_slow(&mut self, addr: u64) -> Result<u32, Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Ok(0);
-        }
-
-        if let Some(off) = self.dram.offset(addr) {
-            if off + 4 > self.dram.data.len() {
-                return Err(Trap::LoadAccessFault(addr));
-            }
-            let bytes = &self.dram.data[off..off + 4];
-            return Ok(u32::from_le_bytes(bytes.try_into().unwrap()));
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -323,23 +293,11 @@ impl Bus for SystemBus {
 
         Err(Trap::LoadAccessFault(addr))
     }
-
-    fn read64(&mut self, addr: u64) -> Result<u64, Trap> {
-        if addr % 8 != 0 {
-            return Err(Trap::LoadAddressMisaligned(addr));
-        }
-
+    
+    #[cold]
+    fn read64_slow(&mut self, addr: u64) -> Result<u64, Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Ok(0);
-        }
-
-        if let Some(off) = self.dram.offset(addr) {
-            if off + 8 > self.dram.data.len() {
-                return Err(Trap::LoadAccessFault(addr));
-            }
-            let bytes = &self.dram.data[off..off + 8];
-            let val = u64::from_le_bytes(bytes.try_into().unwrap());
-            return Ok(val);
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -373,16 +331,12 @@ impl Bus for SystemBus {
 
         Err(Trap::LoadAccessFault(addr))
     }
-
-    fn write8(&mut self, addr: u64, val: u8) -> Result<(), Trap> {
+    
+    #[cold]
+    fn write8_slow(&mut self, addr: u64, val: u8) -> Result<(), Trap> {
         // Any write in the test finisher region signals a requested trap to the host.
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Err(Trap::RequestedTrap(val as u64));
-        }
-
-        if let Some(off) = self.dram.offset(addr) {
-            self.dram.data[off] = val;
-            return Ok(());
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -411,23 +365,11 @@ impl Bus for SystemBus {
 
         Err(Trap::StoreAccessFault(addr))
     }
-
-    fn write16(&mut self, addr: u64, val: u16) -> Result<(), Trap> {
-        if addr % 2 != 0 {
-            return Err(Trap::StoreAddressMisaligned(addr));
-        }
-
+    
+    #[cold]
+    fn write16_slow(&mut self, addr: u64, val: u16) -> Result<(), Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Err(Trap::RequestedTrap(val as u64));
-        }
-
-        if let Some(off) = self.dram.offset(addr) {
-            if off + 2 > self.dram.data.len() {
-                return Err(Trap::StoreAccessFault(addr));
-            }
-            let bytes = val.to_le_bytes();
-            self.dram.data[off..off + 2].copy_from_slice(&bytes);
-            return Ok(());
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -454,23 +396,11 @@ impl Bus for SystemBus {
 
         Err(Trap::StoreAccessFault(addr))
     }
-
-    fn write32(&mut self, addr: u64, val: u32) -> Result<(), Trap> {
-        if addr % 4 != 0 {
-            return Err(Trap::StoreAddressMisaligned(addr));
-        }
-
+    
+    #[cold]
+    fn write32_slow(&mut self, addr: u64, val: u32) -> Result<(), Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Err(Trap::RequestedTrap(val as u64));
-        }
-
-        if let Some(off) = self.dram.offset(addr) {
-            if off + 4 > self.dram.data.len() {
-                return Err(Trap::StoreAccessFault(addr));
-            }
-            let bytes = val.to_le_bytes();
-            self.dram.data[off..off + 4].copy_from_slice(&bytes);
-            return Ok(());
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -504,23 +434,11 @@ impl Bus for SystemBus {
 
         Err(Trap::StoreAccessFault(addr))
     }
-
-    fn write64(&mut self, addr: u64, val: u64) -> Result<(), Trap> {
-        if addr % 8 != 0 {
-            return Err(Trap::StoreAddressMisaligned(addr));
-        }
-
+    
+    #[cold]
+    fn write64_slow(&mut self, addr: u64, val: u64) -> Result<(), Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Err(Trap::RequestedTrap(val));
-        }
-
-        if let Some(off) = self.dram.offset(addr) {
-            if off + 8 > self.dram.data.len() {
-                return Err(Trap::StoreAccessFault(addr));
-            }
-            let bytes = val.to_le_bytes();
-            self.dram.data[off..off + 8].copy_from_slice(&bytes);
-            return Ok(());
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -553,5 +471,138 @@ impl Bus for SystemBus {
         }
 
         Err(Trap::StoreAccessFault(addr))
+    }
+}
+
+impl Bus for SystemBus {
+    #[inline]
+    fn poll_interrupts(&mut self) -> u64 {
+        self.check_interrupts()
+    }
+
+    #[inline(always)]
+    fn read8(&mut self, addr: u64) -> Result<u8, Trap> {
+        // Fast path: DRAM access (most common case)
+        if let Some(off) = self.dram.offset(addr) {
+            return Ok(self.dram.data[off]);
+        }
+        // Slow path: MMIO devices
+        self.read8_slow(addr)
+    }
+
+    #[inline(always)]
+    fn read16(&mut self, addr: u64) -> Result<u16, Trap> {
+        if addr % 2 != 0 {
+            return Err(Trap::LoadAddressMisaligned(addr));
+        }
+        // Fast path: DRAM access (most common case)
+        if let Some(off) = self.dram.offset(addr) {
+            if off + 2 > self.dram.data.len() {
+                return Err(Trap::LoadAccessFault(addr));
+            }
+            let bytes = &self.dram.data[off..off + 2];
+            return Ok(u16::from_le_bytes(bytes.try_into().unwrap()));
+        }
+        // Slow path: MMIO devices
+        self.read16_slow(addr)
+    }
+
+    #[inline(always)]
+    fn read32(&mut self, addr: u64) -> Result<u32, Trap> {
+        if addr % 4 != 0 {
+            return Err(Trap::LoadAddressMisaligned(addr));
+        }
+        // Fast path: DRAM access (most common case)
+        if let Some(off) = self.dram.offset(addr) {
+            if off + 4 > self.dram.data.len() {
+                return Err(Trap::LoadAccessFault(addr));
+            }
+            let bytes = &self.dram.data[off..off + 4];
+            return Ok(u32::from_le_bytes(bytes.try_into().unwrap()));
+        }
+        // Slow path: MMIO devices
+        self.read32_slow(addr)
+    }
+
+    #[inline(always)]
+    fn read64(&mut self, addr: u64) -> Result<u64, Trap> {
+        if addr % 8 != 0 {
+            return Err(Trap::LoadAddressMisaligned(addr));
+        }
+        // Fast path: DRAM access (most common case)
+        if let Some(off) = self.dram.offset(addr) {
+            if off + 8 > self.dram.data.len() {
+                return Err(Trap::LoadAccessFault(addr));
+            }
+            let bytes = &self.dram.data[off..off + 8];
+            return Ok(u64::from_le_bytes(bytes.try_into().unwrap()));
+        }
+        // Slow path: MMIO devices
+        self.read64_slow(addr)
+    }
+
+    #[inline(always)]
+    fn write8(&mut self, addr: u64, val: u8) -> Result<(), Trap> {
+        // Fast path: DRAM access (most common case)
+        if let Some(off) = self.dram.offset(addr) {
+            self.dram.data[off] = val;
+            return Ok(());
+        }
+        // Slow path: MMIO devices
+        self.write8_slow(addr, val)
+    }
+
+    #[inline(always)]
+    fn write16(&mut self, addr: u64, val: u16) -> Result<(), Trap> {
+        if addr % 2 != 0 {
+            return Err(Trap::StoreAddressMisaligned(addr));
+        }
+        // Fast path: DRAM access (most common case)
+        if let Some(off) = self.dram.offset(addr) {
+            if off + 2 > self.dram.data.len() {
+                return Err(Trap::StoreAccessFault(addr));
+            }
+            let bytes = val.to_le_bytes();
+            self.dram.data[off..off + 2].copy_from_slice(&bytes);
+            return Ok(());
+        }
+        // Slow path: MMIO devices
+        self.write16_slow(addr, val)
+    }
+
+    #[inline(always)]
+    fn write32(&mut self, addr: u64, val: u32) -> Result<(), Trap> {
+        if addr % 4 != 0 {
+            return Err(Trap::StoreAddressMisaligned(addr));
+        }
+        // Fast path: DRAM access (most common case)
+        if let Some(off) = self.dram.offset(addr) {
+            if off + 4 > self.dram.data.len() {
+                return Err(Trap::StoreAccessFault(addr));
+            }
+            let bytes = val.to_le_bytes();
+            self.dram.data[off..off + 4].copy_from_slice(&bytes);
+            return Ok(());
+        }
+        // Slow path: MMIO devices
+        self.write32_slow(addr, val)
+    }
+
+    #[inline(always)]
+    fn write64(&mut self, addr: u64, val: u64) -> Result<(), Trap> {
+        if addr % 8 != 0 {
+            return Err(Trap::StoreAddressMisaligned(addr));
+        }
+        // Fast path: DRAM access (most common case)
+        if let Some(off) = self.dram.offset(addr) {
+            if off + 8 > self.dram.data.len() {
+                return Err(Trap::StoreAccessFault(addr));
+            }
+            let bytes = val.to_le_bytes();
+            self.dram.data[off..off + 8].copy_from_slice(&bytes);
+            return Ok(());
+        }
+        // Slow path: MMIO devices
+        self.write64_slow(addr, val)
     }
 }

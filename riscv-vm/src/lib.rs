@@ -203,6 +203,19 @@ impl WasmVm {
             }
         }
     }
+
+    /// Execute up to N instructions in a batch.
+    /// Returns the number of instructions actually executed.
+    /// This is more efficient than calling step() N times due to reduced
+    /// JS-WASM boundary crossings.
+    pub fn step_n(&mut self, count: u32) -> u32 {
+        for i in 0..count {
+            if !self.step() {
+                return i;
+            }
+        }
+        count
+    }
     
     /// Check if the VM has halted (e.g., due to shutdown command).
     pub fn is_halted(&self) -> bool {

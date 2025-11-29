@@ -13,7 +13,7 @@ const PAGE_SIZE: u64 = 4096;
 const PTE_SIZE: u64 = 8;
 const MAX_LEVELS: usize = 4;
 
-const TLB_SIZE: usize = 64;
+const TLB_SIZE: usize = 128;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TlbEntry {
@@ -59,12 +59,14 @@ impl Tlb {
         }
     }
 
+    #[inline]
     pub fn flush(&mut self) {
         for entry in self.entries.iter_mut() {
             entry.valid = false;
         }
     }
 
+    #[inline]
     pub fn flush_asid(&mut self, asid: u64) {
         for entry in self.entries.iter_mut() {
             if !entry.global && entry.asid == asid {
@@ -73,9 +75,11 @@ impl Tlb {
         }
     }
 
+    #[inline]
     pub fn flush_page(&mut self, vpn: u64, asid: u64) {
-        let idx = (vpn as usize) % TLB_SIZE;
-        let entry = &mut self.entries[idx];
+        let idx = (vpn as usize) & (TLB_SIZE - 1);
+        // SAFETY: idx is always < TLB_SIZE due to the bitmask
+        let entry = unsafe { self.entries.get_unchecked_mut(idx) };
 
         if entry.valid && entry.vpn == vpn {
             // For page-specific flush, invalidate matching ASID mappings.
@@ -87,9 +91,12 @@ impl Tlb {
         }
     }
 
+    #[inline(always)]
     pub fn lookup(&self, vpn: u64, asid: u64) -> Option<&TlbEntry> {
-        let idx = (vpn as usize) % TLB_SIZE;
-        let entry = &self.entries[idx];
+        // Use bitwise AND for faster modulo (TLB_SIZE is power of 2)
+        let idx = (vpn as usize) & (TLB_SIZE - 1);
+        // SAFETY: idx is always < TLB_SIZE due to the bitmask
+        let entry = unsafe { self.entries.get_unchecked(idx) };
 
         // Hit if: valid AND VPN matches AND (entry is global OR ASID matches).
         if entry.valid && entry.vpn == vpn && (entry.global || entry.asid == asid) {
@@ -99,9 +106,11 @@ impl Tlb {
         }
     }
 
+    #[inline(always)]
     pub fn insert(&mut self, entry: TlbEntry) {
-        let idx = (entry.vpn as usize) % TLB_SIZE;
-        self.entries[idx] = entry;
+        let idx = (entry.vpn as usize) & (TLB_SIZE - 1);
+        // SAFETY: idx is always < TLB_SIZE due to the bitmask
+        unsafe { *self.entries.get_unchecked_mut(idx) = entry; }
     }
 }
 
@@ -278,6 +287,7 @@ pub fn translate(
     Err(page_fault(access_type, addr))
 }
 
+#[inline(always)]
 fn check_permission_tlb(mode: Mode, mstatus: u64, entry: &TlbEntry, access_type: AccessType) -> bool {
     let mxr = (mstatus >> 19) & 1;
     let sum = (mstatus >> 18) & 1;
@@ -314,6 +324,7 @@ fn check_permission_tlb(mode: Mode, mstatus: u64, entry: &TlbEntry, access_type:
     }
 }
 
+#[inline]
 fn page_fault(access_type: AccessType, addr: u64) -> Trap {
     match access_type {
         AccessType::Instruction => Trap::InstructionPageFault(addr),
@@ -322,6 +333,7 @@ fn page_fault(access_type: AccessType, addr: u64) -> Trap {
     }
 }
 
+#[inline]
 fn access_fault(access_type: AccessType, addr: u64) -> Trap {
     match access_type {
         AccessType::Instruction => Trap::InstructionAccessFault(addr),

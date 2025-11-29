@@ -1,80 +1,50 @@
 use crate::Trap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
 pub enum Register {
-    X0,
-    X1,
-    X2,
-    X3,
-    X4,
-    X5,
-    X6,
-    X7,
-    X8,
-    X9,
-    X10,
-    X11,
-    X12,
-    X13,
-    X14,
-    X15,
-    X16,
-    X17,
-    X18,
-    X19,
-    X20,
-    X21,
-    X22,
-    X23,
-    X24,
-    X25,
-    X26,
-    X27,
-    X28,
-    X29,
-    X30,
-    X31,
+    X0 = 0,
+    X1 = 1,
+    X2 = 2,
+    X3 = 3,
+    X4 = 4,
+    X5 = 5,
+    X6 = 6,
+    X7 = 7,
+    X8 = 8,
+    X9 = 9,
+    X10 = 10,
+    X11 = 11,
+    X12 = 12,
+    X13 = 13,
+    X14 = 14,
+    X15 = 15,
+    X16 = 16,
+    X17 = 17,
+    X18 = 18,
+    X19 = 19,
+    X20 = 20,
+    X21 = 21,
+    X22 = 22,
+    X23 = 23,
+    X24 = 24,
+    X25 = 25,
+    X26 = 26,
+    X27 = 27,
+    X28 = 28,
+    X29 = 29,
+    X30 = 30,
+    X31 = 31,
 }
 
 impl Register {
+    #[inline(always)]
     pub fn from_u32(v: u32) -> Self {
-        match v & 0x1F {
-            0 => Register::X0,
-            1 => Register::X1,
-            2 => Register::X2,
-            3 => Register::X3,
-            4 => Register::X4,
-            5 => Register::X5,
-            6 => Register::X6,
-            7 => Register::X7,
-            8 => Register::X8,
-            9 => Register::X9,
-            10 => Register::X10,
-            11 => Register::X11,
-            12 => Register::X12,
-            13 => Register::X13,
-            14 => Register::X14,
-            15 => Register::X15,
-            16 => Register::X16,
-            17 => Register::X17,
-            18 => Register::X18,
-            19 => Register::X19,
-            20 => Register::X20,
-            21 => Register::X21,
-            22 => Register::X22,
-            23 => Register::X23,
-            24 => Register::X24,
-            25 => Register::X25,
-            26 => Register::X26,
-            27 => Register::X27,
-            28 => Register::X28,
-            29 => Register::X29,
-            30 => Register::X30,
-            31 => Register::X31,
-            _ => unreachable!(),
-        }
+        // SAFETY: v & 0x1F is always in range 0..=31, matching our enum variants
+        unsafe { std::mem::transmute((v & 0x1F) as u8) }
     }
 
+    #[inline(always)]
     pub fn to_usize(&self) -> usize {
         *self as usize
     }
@@ -163,6 +133,7 @@ pub enum Op {
     Fence, // FENCE / FENCE.I
 }
 
+#[inline]
 pub fn decode(insn: u32) -> Result<Op, Trap> {
     let opcode = insn & 0x7F;
     let rd = Register::from_u32((insn >> 7) & 0x1F);
@@ -286,21 +257,25 @@ pub fn decode(insn: u32) -> Result<Op, Trap> {
 // These helpers expand 16-bit compressed instructions into canonical 32-bit
 // encodings, which are then fed through the normal `decode()` function.
 
+#[inline(always)]
 fn encode_i(imm: i32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
     let imm12 = (imm as u32) & 0xFFF;
     (imm12 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
 }
 
+#[inline(always)]
 fn encode_u(imm: i32, rd: u32, opcode: u32) -> u32 {
     // U-type: imm[31:12] in bits[31:12], low 12 bits zero.
     let imm20 = ((imm as u32) >> 12) & 0xFFFFF;
     (imm20 << 12) | (rd << 7) | opcode
 }
 
+#[inline(always)]
 fn encode_r(funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
     (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
 }
 
+#[inline(always)]
 fn encode_s(imm: i32, rs2: u32, rs1: u32, funct3: u32, opcode: u32) -> u32 {
     let imm12 = (imm as u32) & 0xFFF;
     let imm11_5 = (imm12 >> 5) & 0x7F;
@@ -313,6 +288,7 @@ fn encode_s(imm: i32, rs2: u32, rs1: u32, funct3: u32, opcode: u32) -> u32 {
         | opcode
 }
 
+#[inline(always)]
 fn encode_j(imm: i32, rd: u32) -> u32 {
     // J-type immediate, imm is already the signed byte offset.
     let imm20 = ((imm >> 20) & 0x1) as u32;
@@ -322,6 +298,7 @@ fn encode_j(imm: i32, rd: u32) -> u32 {
     (imm20 << 31) | (imm19_12 << 12) | (imm11 << 20) | (imm10_1 << 21) | (rd << 7) | 0x6F
 }
 
+#[inline(always)]
 fn encode_b(imm: i32, rs2: u32, rs1: u32, funct3: u32, opcode: u32) -> u32 {
     // B-type immediate, imm is signed byte offset (multiple of 2).
     let imm13 = (imm as u32) & 0x1FFF;
@@ -339,11 +316,13 @@ fn encode_b(imm: i32, rs2: u32, rs1: u32, funct3: u32, opcode: u32) -> u32 {
         | opcode
 }
 
+#[inline(always)]
 fn sext(value: u32, bits: u8) -> i32 {
     let shift = 32 - bits as i32;
     ((value << shift) as i32) >> shift
 }
 
+#[inline]
 pub fn expand_compressed(insn: u16) -> Result<u32, Trap> {
     let opcode = insn & 0x3;
     let funct3 = (insn >> 13) & 0x7;
@@ -356,6 +335,7 @@ pub fn expand_compressed(insn: u16) -> Result<u32, Trap> {
     }
 }
 
+#[inline]
 fn expand_q0(insn: u16, funct3: u16) -> Result<u32, Trap> {
     let insn_u = insn as u32;
     match funct3 {
@@ -405,6 +385,7 @@ fn expand_q0(insn: u16, funct3: u16) -> Result<u32, Trap> {
     }
 }
 
+#[inline]
 fn expand_q1(insn: u16, funct3: u16) -> Result<u32, Trap> {
     let insn_u = insn as u32;
     match funct3 {
@@ -583,6 +564,7 @@ fn expand_q1(insn: u16, funct3: u16) -> Result<u32, Trap> {
     }
 }
 
+#[inline]
 fn expand_q2(insn: u16, funct3: u16) -> Result<u32, Trap> {
     let insn_u = insn as u32;
     match funct3 {

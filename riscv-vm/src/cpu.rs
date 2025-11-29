@@ -21,6 +21,8 @@ pub struct Cpu {
     pub mode: Mode,
     /// Per-hart TLB for Sv39/Sv48 translation.
     pub tlb: Tlb,
+    /// Poll counter for batching interrupt checks (rolls over every 256 instructions).
+    poll_counter: u8,
 }
 
 impl Cpu {
@@ -40,6 +42,7 @@ impl Cpu {
             csrs,
             mode: Mode::Machine,
             tlb: Tlb::new(),
+            poll_counter: 0,
         }
     }
 
@@ -336,10 +339,30 @@ impl Cpu {
         }
     }
 
+    #[inline]
     fn fetch_and_expand(&mut self, bus: &mut dyn Bus) -> Result<(u32, u8), Trap> {
         let pc = self.pc;
         if pc % 2 != 0 {
             return self.handle_trap(Trap::InstructionAddressMisaligned(pc), pc, None);
+        }
+
+        // Optimization: if PC is 4-byte aligned, try to read 32 bits at once
+        if pc % 4 == 0 {
+            let pa = self.translate_addr(bus, pc, MmuAccessType::Instruction, pc, None)?;
+            if let Ok(word) = bus.read32(pa) {
+                // Check if it's a compressed instruction (bits [1:0] != 0b11)
+                if word & 0x3 != 0x3 {
+                    // Compressed: expand lower 16 bits
+                    let insn32 = match decoder::expand_compressed((word & 0xFFFF) as u16) {
+                        Ok(v) => v,
+                        Err(trap) => return self.handle_trap(trap, pc, None),
+                    };
+                    return Ok((insn32, 2));
+                }
+                // Full 32-bit instruction
+                return Ok((word, 4));
+            }
+            // Fall through to 16-bit fetch on read32 failure
         }
 
         // Fetch first halfword via MMU (instruction access).
@@ -435,36 +458,42 @@ impl Cpu {
     }
 
     pub fn step(&mut self, bus: &mut dyn Bus) -> Result<(), Trap> {
-        // Poll device-driven interrupts into MIP mask.
-        let mut hw_mip = bus.poll_interrupts();
+        // Batch interrupt polling: only check every 256 instructions for performance.
+        // This significantly reduces overhead while maintaining responsiveness.
+        self.poll_counter = self.poll_counter.wrapping_add(1);
+        
+        if self.poll_counter == 0 {
+            // Poll device-driven interrupts into MIP mask.
+            let mut hw_mip = bus.poll_interrupts();
 
-        // Sstc support: raise STIP (bit 5) when time >= stimecmp and Sstc enabled.
-        // menvcfg[63] gate is optional; xv6 enables it.
-        let menvcfg = self.csrs[CSR_MENVCFG as usize];
-        let sstc_enabled = ((menvcfg >> 63) & 1) == 1;
-        let stimecmp = self.csrs[CSR_STIMECMP as usize];
-        if sstc_enabled && stimecmp != 0 {
-            // Read CLINT MTIME directly (physical address).
-            if let Ok(now) = bus.read64(CLINT_BASE + MTIME_OFFSET) {
-                if now >= stimecmp {
-                    hw_mip |= 1 << 5; // STIP
+            // Sstc support: raise STIP (bit 5) when time >= stimecmp and Sstc enabled.
+            // menvcfg[63] gate is optional; xv6 enables it.
+            let menvcfg = self.csrs[CSR_MENVCFG as usize];
+            let sstc_enabled = ((menvcfg >> 63) & 1) == 1;
+            let stimecmp = self.csrs[CSR_STIMECMP as usize];
+            if sstc_enabled && stimecmp != 0 {
+                // Read CLINT MTIME directly (physical address).
+                if let Ok(now) = bus.read64(CLINT_BASE + MTIME_OFFSET) {
+                    if now >= stimecmp {
+                        hw_mip |= 1 << 5; // STIP
+                    }
                 }
             }
-        }
 
-        // Update MIP: preserve software-writable bits (SSIP=bit1, STIP=bit5 if not Sstc),
-        // but always update hardware-driven bits (MSIP=3, MTIP=7, SEIP=9, MEIP=11).
-        // SSIP (bit 1) is software-writable and should be preserved.
-        // STIP (bit 5) is normally read-only but Sstc makes it hardware-driven.
-        let hw_bits: u64 = (1 << 3) | (1 << 7) | (1 << 9) | (1 << 11); // MSIP, MTIP, SEIP, MEIP
-        let hw_bits_with_stip: u64 = hw_bits | (1 << 5); // Include STIP when Sstc enabled
-        
-        let mask = if sstc_enabled { hw_bits_with_stip } else { hw_bits };
-        let old_mip = self.csrs[CSR_MIP as usize];
-        self.csrs[CSR_MIP as usize] = (old_mip & !mask) | (hw_mip & mask);
-        
-        if let Some(trap) = self.check_pending_interrupt() {
-            return self.handle_trap(trap, self.pc, None);
+            // Update MIP: preserve software-writable bits (SSIP=bit1, STIP=bit5 if not Sstc),
+            // but always update hardware-driven bits (MSIP=3, MTIP=7, SEIP=9, MEIP=11).
+            // SSIP (bit 1) is software-writable and should be preserved.
+            // STIP (bit 5) is normally read-only but Sstc makes it hardware-driven.
+            let hw_bits: u64 = (1 << 3) | (1 << 7) | (1 << 9) | (1 << 11); // MSIP, MTIP, SEIP, MEIP
+            let hw_bits_with_stip: u64 = hw_bits | (1 << 5); // Include STIP when Sstc enabled
+            
+            let mask = if sstc_enabled { hw_bits_with_stip } else { hw_bits };
+            let old_mip = self.csrs[CSR_MIP as usize];
+            self.csrs[CSR_MIP as usize] = (old_mip & !mask) | (hw_mip & mask);
+            
+            if let Some(trap) = self.check_pending_interrupt() {
+                return self.handle_trap(trap, self.pc, None);
+            }
         }
 
         let pc = self.pc;

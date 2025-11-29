@@ -36,14 +36,15 @@ impl Dram {
         Self { base, data: vec![0; size] }
     }
 
+    #[inline(always)]
     pub fn offset(&self, addr: u64) -> Option<usize> {
-        if addr >= self.base {
-            let off = (addr - self.base) as usize;
-            if off < self.data.len() {
-                return Some(off);
-            }
+        // Use wrapping_sub to avoid branch on underflow check
+        let off = addr.wrapping_sub(self.base) as usize;
+        if off < self.data.len() {
+            Some(off)
+        } else {
+            None
         }
-        None
     }
 
     pub fn load(&mut self, data: &[u8], offset: u64) -> Result<(), MemoryError> {
@@ -60,6 +61,7 @@ impl Dram {
         Ok(())
     }
 
+    #[inline(always)]
     fn check_bounds(&self, offset: u64, size: usize) -> Result<usize, MemoryError> {
         let off = offset as usize;
         let end = off.checked_add(size).ok_or(MemoryError::OutOfBounds(offset))?;
@@ -69,11 +71,13 @@ impl Dram {
         Ok(off)
     }
 
+    #[inline(always)]
     pub fn load_8(&self, offset: u64) -> Result<u8, MemoryError> {
         let off = self.check_bounds(offset, 1)?;
         Ok(self.data[off])
     }
 
+    #[inline(always)]
     pub fn load_16(&self, offset: u64) -> Result<u16, MemoryError> {
         if offset % 2 != 0 {
             return Err(MemoryError::InvalidAlignment(offset));
@@ -83,6 +87,7 @@ impl Dram {
         Ok(u16::from_le_bytes(bytes))
     }
 
+    #[inline(always)]
     pub fn load_32(&self, offset: u64) -> Result<u32, MemoryError> {
         if offset % 4 != 0 {
             return Err(MemoryError::InvalidAlignment(offset));
@@ -92,21 +97,24 @@ impl Dram {
         Ok(u32::from_le_bytes(bytes))
     }
 
+    #[inline(always)]
     pub fn load_64(&self, offset: u64) -> Result<u64, MemoryError> {
         if offset % 8 != 0 {
             return Err(MemoryError::InvalidAlignment(offset));
-    }
+        }
         let off = self.check_bounds(offset, 8)?;
         let bytes: [u8; 8] = self.data[off..off + 8].try_into().unwrap();
         Ok(u64::from_le_bytes(bytes))
     }
 
+    #[inline(always)]
     pub fn store_8(&mut self, offset: u64, value: u64) -> Result<(), MemoryError> {
         let off = self.check_bounds(offset, 1)?;
         self.data[off] = (value & 0xff) as u8;
         Ok(())
     }
 
+    #[inline(always)]
     pub fn store_16(&mut self, offset: u64, value: u64) -> Result<(), MemoryError> {
         if offset % 2 != 0 {
             return Err(MemoryError::InvalidAlignment(offset));
@@ -117,6 +125,7 @@ impl Dram {
         Ok(())
     }
 
+    #[inline(always)]
     pub fn store_32(&mut self, offset: u64, value: u64) -> Result<(), MemoryError> {
         if offset % 4 != 0 {
             return Err(MemoryError::InvalidAlignment(offset));
@@ -127,6 +136,7 @@ impl Dram {
         Ok(())
     }
 
+    #[inline(always)]
     pub fn store_64(&mut self, offset: u64, value: u64) -> Result<(), MemoryError> {
         if offset % 8 != 0 {
             return Err(MemoryError::InvalidAlignment(offset));
