@@ -341,6 +341,7 @@ fn main() -> ! {
     uart::write_line("    \x1b[1;32m│\x1b[0m                                                                 \x1b[1;32m│\x1b[0m");
     uart::write_line("    \x1b[1;32m╰─────────────────────────────────────────────────────────────────╯\x1b[0m");
     uart::write_line("");
+    uart::write_line("");
 
     cwd_init();
     print_prompt();
