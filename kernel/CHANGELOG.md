@@ -1,3 +1,13 @@
+## 0.0.13 (2025-11-29)
+
+### 🩹 Fixes
+
+- completion Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([aac807a](https://github.com/elribonazo/riscv-vm/commit/aac807a))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.12 (2025-11-29)
 
 ### 🩹 Fixes
