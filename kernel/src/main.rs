@@ -812,30 +812,29 @@ fn init_network() {
                             
                             // Print network configuration
                             uart::write_line("");
-                            uart::write_line("    \x1b[1;34m┌─ Network Interface ─────────────────────────────────────┐\x1b[0m");
-                            uart::write_str("    \x1b[1;34m│\x1b[0m  MAC Address:   \x1b[1;97m");
+                            uart::write_str("    \x1b[0m  MAC Address:   \x1b[1;97m");
                             uart::write_bytes(&s.mac_str());
-                            uart::write_line("\x1b[0m                    \x1b[1;34m│\x1b[0m");
+                            uart::write_line("\x1b[0m                    \x1b[0m");
                             
                             let mut ip_buf = [0u8; 16];
                             let my_ip = net::get_my_ip();
                             let ip_len = net::format_ipv4(my_ip, &mut ip_buf);
-                            uart::write_str("    \x1b[1;34m│\x1b[0m  IPv4 Address:  \x1b[1;97m");
+                            uart::write_str("    \x1b[0m  IPv4 Address:  \x1b[1;97m");
                             uart::write_bytes(&ip_buf[..ip_len]);
                             uart::write_str("/");
                             uart::write_u64(net::PREFIX_LEN as u64);
-                            uart::write_line("\x1b[0m                   \x1b[1;34m│\x1b[0m");
+                            uart::write_line("\x1b[0m                   \x1b[0m");
                             
                             let gw_len = net::format_ipv4(net::GATEWAY, &mut ip_buf);
-                            uart::write_str("    \x1b[1;34m│\x1b[0m  Gateway:       \x1b[1;97m");
+                            uart::write_str("    \x1b[0m  Gateway:       \x1b[1;97m");
                             uart::write_bytes(&ip_buf[..gw_len]);
-                            uart::write_line("\x1b[0m                       \x1b[1;34m│\x1b[0m");
+                            uart::write_line("\x1b[0m                       \x1b[0m");
                             
                             let dns_len = net::format_ipv4(net::DNS_SERVER, &mut ip_buf);
-                            uart::write_str("    \x1b[1;34m│\x1b[0m  DNS Server:    \x1b[1;97m");
+                            uart::write_str("    \x1b[0m  DNS Server:    \x1b[1;97m");
                             uart::write_bytes(&ip_buf[..dns_len]);
-                            uart::write_line("\x1b[0m                       \x1b[1;34m│\x1b[0m");
-                            uart::write_line("    \x1b[1;34m└─────────────────────────────────────────────────────────┘\x1b[0m");
+                            uart::write_line("\x1b[0m                       \x1b[0m");
+                            uart::write_line("");
                         }
                     }
                     print_boot_status("Network stack initialized (smoltcp)", true);
