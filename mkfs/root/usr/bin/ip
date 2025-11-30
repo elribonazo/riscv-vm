@@ -15,17 +15,17 @@ if show_addr {
         print("\x1b[1;34m├─────────────────────────────────────────────────────────────┤\x1b[0m");
         
         let mac = net.mac();
-        let mac_pad = " ".repeat(30 - mac.len());
+        let mac_pad = " ".repeat(61 - 14 - mac.len());
         print("\x1b[1;34m│\x1b[0m  \x1b[1;33mlink/ether\x1b[0m  " + mac + mac_pad + "\x1b[1;34m│\x1b[0m");
         
         let ip = net.ip();
         let prefix = net.prefix().to_string();
         let inet_str = ip + "/" + prefix;
-        let inet_pad = " ".repeat(31 - inet_str.len());
+        let inet_pad = " ".repeat(61 - 14 - inet_str.len());
         print("\x1b[1;34m│\x1b[0m  \x1b[1;33minet\x1b[0m        " + inet_str + inet_pad + "\x1b[1;34m│\x1b[0m");
         
         let gw = net.gateway();
-        let gw_pad = " ".repeat(34 - gw.len());
+        let gw_pad = " ".repeat(61 - 15 - gw.len());
         print("\x1b[1;34m│\x1b[0m  \x1b[1;33mgateway\x1b[0m     " + gw + gw_pad + "\x1b[1;34m│\x1b[0m");
         
         print("\x1b[1;34m│\x1b[0m                                                             \x1b[1;34m│\x1b[0m");
