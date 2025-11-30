@@ -4062,17 +4062,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"risk-v@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "risk-v@workspace:."
-  dependencies:
-    "@monodon/rust": "npm:^2.3.0"
-    "@nx/js": "npm:^22.1.3"
-    nx: "npm:^22.1.3"
-    prettier: "npm:^3.7.1"
-  languageName: unknown
-  linkType: soft
-
 "rollup@npm:^4.34.8":
   version: 4.53.3
   resolution: "rollup@npm:4.53.3"
@@ -4609,6 +4598,17 @@ __metadata:
   checksum: 10c0/41a5bdd214df2f6c3ecf8622745e4a366c4adced864bc3c833739791aeeeb1838119af7daed4ba36428114b5c67dcda034a79c882e97e43c03e66a4dd7389942
   languageName: node
   linkType: hard
+
+"virtual-machine-monorepo@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "virtual-machine-monorepo@workspace:."
+  dependencies:
+    "@monodon/rust": "npm:^2.3.0"
+    "@nx/js": "npm:^22.1.3"
+    nx: "npm:^22.1.3"
+    prettier: "npm:^3.7.1"
+  languageName: unknown
+  linkType: soft
 
 "virtual-machine@workspace:riscv-vm":
   version: 0.0.0-use.local

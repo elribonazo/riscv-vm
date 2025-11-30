@@ -117,13 +117,14 @@ if url == "" {
                     }
                 }
             } else if status >= 300 && status < 400 {
-                // Redirect
+                // This shouldn't happen since http.get() now follows redirects automatically
+                // But just in case the server returns a redirect we can't follow
                 let location = "";
                 if response.headers.contains("Location") {
                     location = response.headers.Location;
                 }
                 print("\x1b[1;33mRedirect:\x1b[0m " + location);
-                print("(Following redirects not yet supported)");
+                print("(Redirect not followed - may be unsupported type)");
             } else {
                 // Error
                 print("\x1b[1;31mError:\x1b[0m HTTP " + status.to_string() + " " + status_text);

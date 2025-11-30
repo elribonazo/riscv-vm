@@ -8,7 +8,7 @@ import * as mem from "os:mem"
 
 print("");
 print("\x1b[1;35m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-print("\x1b[1;35m│\x1b[0m              \x1b[1;97mRISK-V System Information\x1b[0m                      \x1b[1;35m│\x1b[0m");
+print("\x1b[1;35m│\x1b[0m              \x1b[1;97mBAVY OS System Information\x1b[0m                      \x1b[1;35m│\x1b[0m");
 print("\x1b[1;35m├─────────────────────────────────────────────────────────────┤\x1b[0m");
 
 let version = sys.version();

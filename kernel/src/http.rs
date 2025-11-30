@@ -4,12 +4,16 @@
 //! - GET, POST, PUT, DELETE methods
 //! - Custom headers
 //! - Response parsing with status, headers, and body
+//! - Automatic redirect following (301, 302, 303, 307, 308)
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use smoltcp::wire::Ipv4Address;
+
+/// Maximum number of redirects to follow before giving up
+const MAX_REDIRECTS: u8 = 10;
 
 /// HTTP methods
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,7 +65,7 @@ impl HttpRequest {
         
         let mut headers = BTreeMap::new();
         headers.insert("Host".to_string(), parsed.host.clone());
-        headers.insert("User-Agent".to_string(), "RISK-V/0.1".to_string());
+        headers.insert("User-Agent".to_string(), format!("BAVY OS/{}", env!("CARGO_PKG_VERSION")));
         headers.insert("Accept".to_string(), "*/*".to_string());
         headers.insert("Connection".to_string(), "close".to_string());
         
@@ -160,6 +164,15 @@ impl HttpResponse {
         self.header("content-length")
             .and_then(|v| v.parse().ok())
     }
+    
+    /// Get redirect location if this is a redirect response
+    pub fn redirect_location(&self) -> Option<&String> {
+        if self.is_redirect() {
+            self.header("location")
+        } else {
+            None
+        }
+    }
 }
 
 /// URL parsing result
@@ -203,6 +216,49 @@ fn parse_url(url: &str) -> Result<ParsedUrl, &'static str> {
         path: path.to_string(),
         is_https,
     })
+}
+
+/// Resolve a redirect URL relative to the original request
+/// 
+/// Handles:
+/// - Absolute URLs (http://example.com/path or https://...)
+/// - Protocol-relative URLs (//example.com/path)  
+/// - Absolute paths (/path/to/resource)
+/// - Relative paths (path/to/resource)
+fn resolve_redirect_url(original: &HttpRequest, location: &str) -> Result<String, &'static str> {
+    // Absolute URL
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    
+    // Protocol-relative URL
+    if location.starts_with("//") {
+        let protocol = if original.is_https { "https:" } else { "http:" };
+        return Ok(format!("{}{}", protocol, location));
+    }
+    
+    // Build base URL from original request
+    let protocol = if original.is_https { "https" } else { "http" };
+    let port_str = if (original.is_https && original.port == 443) || 
+                      (!original.is_https && original.port == 80) {
+        String::new()
+    } else {
+        format!(":{}", original.port)
+    };
+    
+    // Absolute path
+    if location.starts_with('/') {
+        return Ok(format!("{}://{}{}{}", protocol, original.host, port_str, location));
+    }
+    
+    // Relative path - resolve against current path
+    let base_path = if let Some(last_slash) = original.path.rfind('/') {
+        &original.path[..=last_slash]
+    } else {
+        "/"
+    };
+    
+    Ok(format!("{}://{}{}{}{}", protocol, original.host, port_str, base_path, location))
 }
 
 /// Parse raw HTTP response bytes into HttpResponse
@@ -413,6 +469,98 @@ pub fn http_request(
     parse_response(&response_buf)
 }
 
+/// Perform an HTTP request with automatic redirect following
+/// 
+/// This is similar to `http_request` but automatically follows 3xx redirects
+/// up to MAX_REDIRECTS times.
+/// 
+/// Redirect types handled:
+/// - 301 Moved Permanently
+/// - 302 Found
+/// - 303 See Other (method changes to GET)
+/// - 307 Temporary Redirect (preserves method)
+/// - 308 Permanent Redirect (preserves method)
+pub fn http_request_follow_redirects(
+    net: &mut crate::net::NetState,
+    request: &HttpRequest,
+    timeout_ms: i64,
+    get_time_ms: fn() -> i64,
+) -> Result<HttpResponse, &'static str> {
+    let mut current_request = HttpRequest {
+        method: request.method,
+        host: request.host.clone(),
+        path: request.path.clone(),
+        port: request.port,
+        headers: request.headers.clone(),
+        body: request.body.clone(),
+        is_https: request.is_https,
+    };
+    
+    let mut redirects = 0u8;
+    
+    loop {
+        let response = http_request(net, &current_request, timeout_ms, get_time_ms)?;
+        
+        // Check if this is a redirect
+        if !response.is_redirect() {
+            return Ok(response);
+        }
+        
+        // Check redirect limit
+        redirects += 1;
+        if redirects > MAX_REDIRECTS {
+            return Err("Too many redirects");
+        }
+        
+        // Get redirect location
+        let location = response.redirect_location()
+            .ok_or("Redirect without Location header")?;
+        
+        // Resolve the redirect URL
+        let new_url = resolve_redirect_url(&current_request, location)?;
+        
+        crate::uart::write_str("Redirecting to: ");
+        crate::uart::write_line(&new_url);
+        
+        // Parse the new URL
+        let parsed = parse_url(&new_url)?;
+        
+        // For 303, change method to GET and drop body
+        // For 301/302, many clients also change to GET (though technically shouldn't for 301)
+        let new_method = if response.status_code == 303 || 
+                           (response.status_code == 301 || response.status_code == 302) && 
+                           current_request.method == HttpMethod::Post {
+            HttpMethod::Get
+        } else {
+            current_request.method
+        };
+        
+        // Build new request
+        let mut new_headers = BTreeMap::new();
+        new_headers.insert("Host".to_string(), parsed.host.clone());
+        new_headers.insert("User-Agent".to_string(), format!("BAVY OS/{}", env!("CARGO_PKG_VERSION")));
+        new_headers.insert("Accept".to_string(), "*/*".to_string());
+        new_headers.insert("Connection".to_string(), "close".to_string());
+        
+        // Drop body for GET requests
+        let new_body = if new_method == HttpMethod::Get {
+            None
+        } else {
+            current_request.body.clone()
+        };
+        
+        current_request = HttpRequest {
+            method: new_method,
+            host: parsed.host,
+            path: parsed.path,
+            port: parsed.port,
+            headers: new_headers,
+            body: new_body,
+            is_https: parsed.is_https,
+        };
+    }
+}
+
 /// Resolve hostname to IP address (handles both IPs and hostnames)
 fn resolve_host(
     net: &mut crate::net::NetState,
@@ -441,7 +589,7 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// Simple GET request helper
+/// Simple GET request helper (does not follow redirects)
 pub fn get(
     net: &mut crate::net::NetState,
     url: &str,
@@ -450,6 +598,17 @@ pub fn get(
 ) -> Result<HttpResponse, &'static str> {
     let request = HttpRequest::get(url)?;
     http_request(net, &request, timeout_ms, get_time_ms)
+}
+
+/// Simple GET request helper that follows redirects
+pub fn get_follow_redirects(
+    net: &mut crate::net::NetState,
+    url: &str,
+    timeout_ms: i64,
+    get_time_ms: fn() -> i64,
+) -> Result<HttpResponse, &'static str> {
+    let request = HttpRequest::get(url)?;
+    http_request_follow_redirects(net, &request, timeout_ms, get_time_ms)
 }
 
 /// Simple POST request helper
@@ -499,7 +658,7 @@ fn https_request(
         get_time_ms,
     ) {
         Ok(bytes) => bytes,
-        Err(e) => {
+        Err(_) => {
             // TLS 1.3 failed, try TLS 1.2
             crate::uart::write_line("TLS 1.3 failed, trying TLS 1.2...");
             

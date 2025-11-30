@@ -226,6 +226,21 @@ impl Uart {
     pub fn pop_output(&mut self) -> Option<u8> {
         self.output.pop_front()
     }
+
+    /// Push a byte directly to the output queue.
+    /// This is used by the VM itself to emit messages (banners, status, etc.)
+    /// that should appear in the same output stream as guest UART output.
+    pub fn push_output(&mut self, byte: u8) {
+        self.output.push_back(byte);
+    }
+
+    /// Push a string directly to the output queue.
+    /// Convenience method for emitting VM messages.
+    pub fn push_output_str(&mut self, s: &str) {
+        for b in s.bytes() {
+            self.output.push_back(b);
+        }
+    }
 }
 
 

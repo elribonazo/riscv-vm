@@ -19,9 +19,11 @@
 
 ## Overview
 
-**RISK-V** is a high-performance emulator and operating system environment designed to bring the RISC-V architecture to the browser and desktop. It features a complete RV64GC virtual machine, a custom bare-metal kernel, and a peer-to-peer networking relay, all written in Rust.
+**BAVY** is a high-performance emulator and operating system environment designed to bring the RISC-V architecture to the browser and desktop. It features a complete RV64GC virtual machine, a custom bare-metal kernel, and a peer-to-peer networking relay, all written in Rust.
 
-Whether you want to run Linux in your browser, learn about OS development, or experiment with networked virtual machines, RISK-V provides the tools you need.
+Whether you want to run Linux in your browser, learn about OS development, or experiment with networked virtual machines, riscv provides the tools you need.
+
+The operating system and tooling is fully customizable and includes a fully functional javascript runtime 
 
 ## Components
 

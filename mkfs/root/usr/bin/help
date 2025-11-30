@@ -2,7 +2,7 @@
 // Usage: help
 
 print("\x1b[1;36m+-------------------------------------------------------------+\x1b[0m");
-print("\x1b[1;36m|\x1b[0m                   \x1b[1;97mRISK-V OS Commands\x1b[0m                        \x1b[1;36m|\x1b[0m");
+print("\x1b[1;36m|\x1b[0m                   \x1b[1;97mBAVY OS Commands\x1b[0m                        \x1b[1;36m|\x1b[0m");
 print("\x1b[1;36m+-------------------------------------------------------------+\x1b[0m");
 print("\x1b[1;36m|\x1b[0m  \x1b[1;33mBuilt-in:\x1b[0m                                                 \x1b[1;36m|\x1b[0m");
 print("\x1b[1;36m|\x1b[0m    clear           Clear the screen                         \x1b[1;36m|\x1b[0m");

@@ -638,11 +638,11 @@ pub fn https_get(
     let request = alloc::format!(
         "GET {} HTTP/1.1\r\n\
          Host: {}\r\n\
-         User-Agent: RISK-V/0.1\r\n\
+         User-Agent: BAVY OS/{}\r\n\
          Accept: */*\r\n\
          Connection: close\r\n\
          \r\n",
-        path, hostname
+        path, hostname, env!("CARGO_PKG_VERSION")
     );
     
     https_request(net, ip, port, hostname, request.as_bytes(), timeout_ms, get_time)

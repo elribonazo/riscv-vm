@@ -249,15 +249,27 @@ impl WasmVm {
     /// This allows the VM to emit its own messages that the browser can display
     /// alongside kernel output.
     fn emit_to_uart(&mut self, s: &str) {
-        for byte in s.bytes() {
-            self.bus.uart.output.push_back(byte);
-        }
+        self.bus.uart.push_output_str(s);
+    }
+    
+    /// Log a message to both browser console and UART output.
+    /// This ensures VM messages appear in both the developer console 
+    /// and the terminal UI visible to users.
+    fn log_to_uart(&mut self, prefix: &str, message: &str) {
+        // Log to browser console
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
+            &format!("{} {}", prefix, message)));
+        // Also emit to UART so it appears in the terminal UI
+        self.emit_to_uart(prefix);
+        self.emit_to_uart(" ");
+        self.emit_to_uart(message);
+        self.emit_to_uart("\n");
     }
     
     /// Print the VM banner to UART output (visible in browser).
     /// Call this after creating the VM to show a boot banner.
     pub fn print_banner(&mut self) {
-        const BANNER: &str = "\x1b[1;36m\
+        let banner = format!("\x1b[1;36m\
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                                                                         │
 │   ██████╗  █████╗ ██╗   ██╗██╗   ██╗    ██╗   ██╗███╗   ███╗            │
@@ -267,12 +279,9 @@ impl WasmVm {
 │   ██████╔╝██║  ██║ ╚████╔╝    ██║        ╚████╔╝ ██║ ╚═╝ ██║            │
 │   ╚═════╝ ╚═╝  ╚═╝  ╚═══╝     ╚═╝         ╚═══╝  ╚═╝     ╚═╝            │
 │                                                                         │
-│   \x1b[1;97mBavy Virtual Machine v0.1.0\x1b[1;36m                                          │
-│   \x1b[0;90m64-bit RISC-V Emulator with VirtIO Support\x1b[1;36m                           │
-│                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
-\x1b[0m\n";
-        self.emit_to_uart(BANNER);
+\x1b[0m\n");
+        self.emit_to_uart(&banner);
     }
     
     /// Print a status message to UART output (visible in browser).

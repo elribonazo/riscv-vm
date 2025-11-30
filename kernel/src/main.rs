@@ -14,7 +14,7 @@ mod virtio_blk;
 mod virtio_net;
 
 extern crate alloc;
-use alloc::vec::Vec;
+use alloc::{format, string::String, vec::Vec};
 use panic_halt as _;
 use riscv_rt::entry;
 
@@ -256,24 +256,6 @@ fn get_time_ms() -> i64 {
     (mtime / 10_000) as i64
 }
 
-/// Print the kernel boot banner
-fn print_banner() {
-    uart::write_line("");
-    uart::write_line("\x1b[1;35m    +=====================================================================+\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m                                                                     \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m ____  ___ ____  _  __    __     __   ___  ____  \x1b[0m                \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m|  _ \\|_ _/ ___|| |/ /    \\ \\   / /  / _ \\/ ___| \x1b[0m                \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m| |_) || |\\___ \\| ' / _____\\ \\ / /  | | | \\___ \\ \x1b[0m                \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m|  _ < | | ___) | . \\|_____|_\\ V /___| |_| |___) |\x1b[0m                \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m   \x1b[1;36m|_| \\_\\___|____/|_|\\_\\      \\_/     \\___/|____/ \x1b[0m                \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m                                                                     \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m     \x1b[1;97mRISC-V Operating System Kernel v0.1.0\x1b[0m                           \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m     \x1b[0;90mBuilt with Rust - smoltcp networking - VirtIO drivers\x1b[0m          \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    |\x1b[0m                                                                     \x1b[1;35m|\x1b[0m");
-    uart::write_line("\x1b[1;35m    +=====================================================================+\x1b[0m");
-    uart::write_line("");
-}
-
 /// Print a section header
 fn print_section(title: &str) {
     uart::write_line("");
@@ -305,9 +287,6 @@ fn print_boot_info(key: &str, value: &str) {
 
 #[entry]
 fn main() -> ! {
-    // ─── BOOT BANNER ──────────────────────────────────────────────────────────
-    print_banner();
-    
     // ─── CPU & ARCHITECTURE INFO ──────────────────────────────────────────────
     print_section("CPU & ARCHITECTURE");
     print_boot_info("Architecture", "RISC-V 64-bit (RV64GC)");
@@ -339,14 +318,7 @@ fn main() -> ! {
     init_network();
     
     // ─── BOOT COMPLETE ────────────────────────────────────────────────────────
-    print_section("BOOT COMPLETE");
-    uart::write_line("");
-    uart::write_line("    \x1b[1;32m╭─────────────────────────────────────────────────────────────────╮\x1b[0m");
-    uart::write_line("    \x1b[1;32m│\x1b[0m                                                                 \x1b[1;32m│\x1b[0m");
-    uart::write_line("    \x1b[1;32m│\x1b[0m   \x1b[1;97mRISK-V OS is ready!\x1b[0m                                           \x1b[1;32m│\x1b[0m");
-    uart::write_line("    \x1b[1;32m│\x1b[0m   \x1b[0;90mType 'help' for available commands\x1b[0m                            \x1b[1;32m│\x1b[0m");
-    uart::write_line("    \x1b[1;32m│\x1b[0m                                                                 \x1b[1;32m│\x1b[0m");
-    uart::write_line("    \x1b[1;32m╰─────────────────────────────────────────────────────────────────╯\x1b[0m");
+    print_section(&format!("\x1b[1;97mBAVY OS BOOT COMPLETE!\x1b[0m"));
     uart::write_line("");
     uart::write_line("");
 
@@ -487,7 +459,6 @@ fn main() -> ! {
                 }
                 last_newline = byte;
                 uart::write_line("");  // Echo the newline
-                uart::write_line("");  // Add blank line before command output
                 
                 // Save to history if non-empty
                 if len > 0 {
@@ -1005,9 +976,14 @@ fn poll_network() {
 }
 
 fn print_prompt() {
-    uart::write_str("\x1b[1;35mrisk-v\x1b[0m:\x1b[1;34m");
-    uart::write_str(cwd_get());
-    uart::write_str("\x1b[0m$ ");
+    let cwd = cwd_get();
+    let prompt_path = if cwd == "/" {
+        String::new()
+    } else {
+        format!(" {}", cwd)
+    };
+    
+    uart::write_str(&format!("\x1b[1;35mBavy\x1b[0m\x1b[1;34m{}\x1b[0m # ", prompt_path));
 }
 
 /// Parse a command line for redirection operators
@@ -1090,11 +1066,6 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
         arg_start += 1;
     }
     let args = &line[arg_start..];
-
-    // Print newline before command output (only if not redirecting)
-    if redirect_mode == RedirectMode::None {
-        uart::write_line("");
-    }
     
     // Start capturing if redirecting
     if redirect_mode != RedirectMode::None {
@@ -1334,7 +1305,7 @@ fn cmd_node(args: &[u8]) {
 /// Help command - now a script, but we keep a fallback built-in
 fn cmd_help() {
     out_line("\x1b[1;36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-    out_line("\x1b[1;36m│\x1b[0m                   \x1b[1;97mRISK-V OS Commands\x1b[0m                        \x1b[1;36m│\x1b[0m");
+    out_line("\x1b[1;36m│\x1b[0m                   \x1b[1;97mBAVY OS Commands\x1b[0m                        \x1b[1;36m│\x1b[0m");
     out_line("\x1b[1;36m├─────────────────────────────────────────────────────────────┤\x1b[0m");
     out_line("\x1b[1;36m│\x1b[0m  \x1b[1;33mBuilt-in:\x1b[0m                                                 \x1b[1;36m│\x1b[0m");
     out_line("\x1b[1;36m│\x1b[0m    cd <dir>        Change directory                         \x1b[1;36m│\x1b[0m");

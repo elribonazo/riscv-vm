@@ -562,7 +562,8 @@ impl ScriptRuntime {
         
         // kernel_version() -> String
         engine.register_fn("kernel_version", || -> ImmutableString {
-            "RISK-V OS v0.1.0".into()
+            const VERSION: &str = env!("CARGO_PKG_VERSION");
+            format!("BAVY OS v{}", VERSION).into()
         });
         
         // arch() -> String
@@ -653,6 +654,11 @@ impl ScriptRuntime {
                 .and_then(|v| v.clone().try_cast::<i64>())
                 .unwrap_or(10000);
             
+            // Extract followRedirects option (default: true)
+            let follow_redirects = options.get("followRedirects")
+                .and_then(|v| v.clone().try_cast::<bool>())
+                .unwrap_or(true);
+            
             // Build the request
             let mut request = match crate::http::HttpRequest::new(method, &url) {
                 Ok(r) => r,
@@ -684,7 +690,12 @@ impl ScriptRuntime {
             // Perform the request
             unsafe {
                 if let Some(ref mut net) = crate::NET_STATE {
-                    match crate::http::http_request(net, &request, timeout, get_time_ms) {
+                    let http_result = if follow_redirects {
+                        crate::http::http_request_follow_redirects(net, &request, timeout, get_time_ms)
+                    } else {
+                        crate::http::http_request(net, &request, timeout, get_time_ms)
+                    };
+                    match http_result {
                         Ok(response) => {
                             // Extract body first (needs borrow), then move other fields
                             let body_text = response.text();
@@ -718,12 +729,13 @@ impl ScriptRuntime {
         });
         
         // http_get(url) -> {ok, status, body, ...}
+        // Automatically follows redirects
         engine.register_fn("http_get", |url: ImmutableString| -> Map {
             let mut result = Map::new();
             
             unsafe {
                 if let Some(ref mut net) = crate::NET_STATE {
-                    match crate::http::get(net, url.as_str(), 10000, get_time_ms) {
+                    match crate::http::get_follow_redirects(net, url.as_str(), 10000, get_time_ms) {
                         Ok(response) => {
                             let body_text = response.text();
                             let status_code = response.status_code;
@@ -917,7 +929,8 @@ impl ScriptRuntime {
             crate::cwd_get().into()
         });
         engine.register_fn("version", |_: &mut SysModule| -> ImmutableString {
-            "RISK-V OS v0.1.0".into()
+            const VERSION: &str = env!("CARGO_PKG_VERSION");
+            format!("BAVY OS v{}", VERSION).into()
         });
         engine.register_fn("arch", |_: &mut SysModule| -> ImmutableString {
             "RISC-V 64-bit (RV64GC)".into()
@@ -958,12 +971,13 @@ impl ScriptRuntime {
         
         // HttpModule methods
         // http.get(url) -> response object
+        // Automatically follows redirects
         engine.register_fn("get", |_: &mut HttpModule, url: ImmutableString| -> Map {
             let mut result = Map::new();
             
             unsafe {
                 if let Some(ref mut net) = crate::NET_STATE {
-                    match crate::http::get(net, url.as_str(), 10000, get_time_ms_mod) {
+                    match crate::http::get_follow_redirects(net, url.as_str(), 10000, get_time_ms_mod) {
                         Ok(response) => {
                             let body_text = response.text();
                             let status_code = response.status_code;

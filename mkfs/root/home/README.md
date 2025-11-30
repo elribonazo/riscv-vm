@@ -1,6 +1,6 @@
-# RISK-V OS JavaScript Runtime
+# BAVY OS JavaScript Runtime
 
-RISK-V OS includes a JavaScript runtime with ES6-style module imports for
+BAVY OS includes a JavaScript runtime with ES6-style module imports for
 accessing operating system functionality.
 
 ---
@@ -248,7 +248,7 @@ print("Current dir: " + sys.cwd());
 ### `sys.version()`
 Get kernel version string.
 
-**Returns:** `String` - Version (e.g., "RISK-V OS v0.1.0")
+**Returns:** `String` - Version (e.g., "BAVY OS")
 
 ```javascript
 import * as sys from "os:sys"
