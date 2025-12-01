@@ -13,41 +13,111 @@ const PAGE_SIZE: u64 = 4096;
 const PTE_SIZE: u64 = 8;
 const MAX_LEVELS: usize = 4;
 
-const TLB_SIZE: usize = 128;
+/// TLB size (power of 2 for fast modulo)
+const TLB_SIZE: usize = 64;
+const TLB_MASK: usize = TLB_SIZE - 1;
 
+/// Permission bit masks for packed perm field
+pub const PERM_R: u8 = 1 << 0;
+pub const PERM_W: u8 = 1 << 1;
+pub const PERM_X: u8 = 1 << 2;
+pub const PERM_U: u8 = 1 << 3;
+pub const PERM_A: u8 = 1 << 4;
+pub const PERM_D: u8 = 1 << 5;
+pub const PERM_G: u8 = 1 << 6; // Global mapping bit
+
+/// Compact, cache-friendly TLB entry structure.
+/// Memory layout: 8 + 8 + 2 + 1 + 1 + 1 + padding = 24 bytes
+/// Total TLB: 64 × 24 = 1.5KB (fits in L1 cache)
 #[derive(Clone, Copy, Debug)]
 pub struct TlbEntry {
+    /// Virtual page number (upper bits of VA)
     pub vpn: u64,
+    /// Physical page number (translated)
     pub ppn: u64,
+    /// Address Space Identifier (16 bits in RISC-V SATP)
+    pub asid: u16,
+    /// Packed permission bits (R/W/X/U/A/D/G)
+    pub perm: u8,
+    /// Page level (0=4KB, 1=2MB megapage, 2=1GB gigapage, 3=512GB)
+    pub level: u8,
+    /// Entry is valid
     pub valid: bool,
-    pub asid: u64,
-    pub global: bool, // Global mapping bit
-    pub r: bool,
-    pub w: bool,
-    pub x: bool,
-    pub u: bool,
-    pub a: bool,
-    pub d: bool,
+}
+
+impl TlbEntry {
+    /// Empty/invalid TLB entry constant
+    pub const EMPTY: Self = Self {
+        vpn: 0,
+        ppn: 0,
+        asid: 0,
+        perm: 0,
+        level: 0,
+        valid: false,
+    };
+
+    /// Check if entry has read permission
+    #[inline(always)]
+    pub const fn r(&self) -> bool {
+        self.perm & PERM_R != 0
+    }
+
+    /// Check if entry has write permission
+    #[inline(always)]
+    pub const fn w(&self) -> bool {
+        self.perm & PERM_W != 0
+    }
+
+    /// Check if entry has execute permission
+    #[inline(always)]
+    pub const fn x(&self) -> bool {
+        self.perm & PERM_X != 0
+    }
+
+    /// Check if entry is user-accessible
+    #[inline(always)]
+    pub const fn u(&self) -> bool {
+        self.perm & PERM_U != 0
+    }
+
+    /// Check if entry has been accessed
+    #[inline(always)]
+    pub const fn a(&self) -> bool {
+        self.perm & PERM_A != 0
+    }
+
+    /// Check if entry is dirty (written)
+    #[inline(always)]
+    pub const fn d(&self) -> bool {
+        self.perm & PERM_D != 0
+    }
+
+    /// Check if entry is global (ignores ASID)
+    #[inline(always)]
+    pub const fn global(&self) -> bool {
+        self.perm & PERM_G != 0
+    }
+
+    /// Set the accessed bit
+    #[inline(always)]
+    pub fn set_a(&mut self) {
+        self.perm |= PERM_A;
+    }
+
+    /// Set the dirty bit
+    #[inline(always)]
+    pub fn set_d(&mut self) {
+        self.perm |= PERM_D;
+    }
 }
 
 impl Default for TlbEntry {
     fn default() -> Self {
-        Self {
-            vpn: 0,
-            ppn: 0,
-            valid: false,
-            asid: 0,
-            global: false,
-            r: false,
-            w: false,
-            x: false,
-            u: false,
-            a: false,
-            d: false,
-        }
+        Self::EMPTY
     }
 }
 
+/// Direct-mapped TLB for fast virtual-to-physical address translation
 pub struct Tlb {
     entries: [TlbEntry; TLB_SIZE],
 }
@@ -55,62 +125,137 @@ pub struct Tlb {
 impl Tlb {
     pub fn new() -> Self {
         Self {
-            entries: [TlbEntry::default(); TLB_SIZE],
+            entries: [TlbEntry::EMPTY; TLB_SIZE],
         }
     }
 
+    /// Flush entire TLB (SFENCE.VMA with rs1=x0, rs2=x0)
     #[inline]
     pub fn flush(&mut self) {
-        for entry in self.entries.iter_mut() {
+        for entry in &mut self.entries {
             entry.valid = false;
         }
     }
 
+    /// Flush by ASID (SFENCE.VMA with rs2!=x0)
+    /// Global mappings are not flushed.
     #[inline]
     pub fn flush_asid(&mut self, asid: u64) {
-        for entry in self.entries.iter_mut() {
-            if !entry.global && entry.asid == asid {
+        let asid16 = asid as u16;
+        for entry in &mut self.entries {
+            if !entry.global() && entry.asid == asid16 {
                 entry.valid = false;
             }
         }
     }
 
+    /// Flush specific virtual address (SFENCE.VMA with rs1!=x0)
+    #[inline]
+    pub fn flush_va(&mut self, va: u64) {
+        let vpn = va >> 12;
+        let idx = (vpn as usize) & TLB_MASK;
+        // SAFETY: idx is always < TLB_SIZE due to the bitmask
+        let entry = unsafe { self.entries.get_unchecked_mut(idx) };
+
+        if entry.vpn == vpn {
+            entry.valid = false;
+        }
+    }
+
+    /// Flush specific page with ASID check (SFENCE.VMA with rs1!=x0, rs2!=x0)
     #[inline]
     pub fn flush_page(&mut self, vpn: u64, asid: u64) {
-        let idx = (vpn as usize) & (TLB_SIZE - 1);
+        let idx = (vpn as usize) & TLB_MASK;
         // SAFETY: idx is always < TLB_SIZE due to the bitmask
         let entry = unsafe { self.entries.get_unchecked_mut(idx) };
 
         if entry.valid && entry.vpn == vpn {
             // For page-specific flush, invalidate matching ASID mappings.
             // Global mappings ignore ASID and are treated as matching.
-            let match_asid = entry.global || entry.asid == asid;
+            let match_asid = entry.global() || entry.asid == asid as u16;
             if match_asid {
                 entry.valid = false;
             }
         }
     }
 
+    /// Look up a virtual page number in the TLB.
+    /// Returns reference to TlbEntry if found, None if miss.
     #[inline(always)]
     pub fn lookup(&self, vpn: u64, asid: u64) -> Option<&TlbEntry> {
-        // Use bitwise AND for faster modulo (TLB_SIZE is power of 2)
-        let idx = (vpn as usize) & (TLB_SIZE - 1);
+        let idx = (vpn as usize) & TLB_MASK;
         // SAFETY: idx is always < TLB_SIZE due to the bitmask
         let entry = unsafe { self.entries.get_unchecked(idx) };
 
         // Hit if: valid AND VPN matches AND (entry is global OR ASID matches).
-        if entry.valid && entry.vpn == vpn && (entry.global || entry.asid == asid) {
+        if entry.valid && entry.vpn == vpn && (entry.global() || entry.asid == asid as u16) {
             Some(entry)
         } else {
             None
         }
     }
 
+    /// Fast lookup returning just (ppn, perm) for common case
+    #[inline(always)]
+    pub fn lookup_fast(&self, vpn: u64, asid: u64) -> Option<(u64, u8)> {
+        let idx = (vpn as usize) & TLB_MASK;
+        // SAFETY: idx is always < TLB_SIZE due to the bitmask
+        let entry = unsafe { self.entries.get_unchecked(idx) };
+
+        if entry.valid && entry.vpn == vpn && (entry.global() || entry.asid == asid as u16) {
+            Some((entry.ppn, entry.perm))
+        } else {
+            None
+        }
+    }
+
+    /// Look up with level awareness (for superpages)
+    #[inline]
+    pub fn lookup_with_level(&self, vpn: u64, asid: u64) -> Option<(u64, u8, u8)> {
+        let idx = (vpn as usize) & TLB_MASK;
+        // SAFETY: idx is always < TLB_SIZE due to the bitmask
+        let entry = unsafe { self.entries.get_unchecked(idx) };
+
+        if entry.valid && entry.vpn == vpn && (entry.global() || entry.asid == asid as u16) {
+            Some((entry.ppn, entry.perm, entry.level))
+        } else {
+            None
+        }
+    }
+
+    /// Insert a TLB entry. Overwrites any existing entry at the same index.
     #[inline(always)]
     pub fn insert(&mut self, entry: TlbEntry) {
-        let idx = (entry.vpn as usize) & (TLB_SIZE - 1);
+        let idx = (entry.vpn as usize) & TLB_MASK;
         // SAFETY: idx is always < TLB_SIZE due to the bitmask
-        unsafe { *self.entries.get_unchecked_mut(idx) = entry; }
+        unsafe {
+            *self.entries.get_unchecked_mut(idx) = entry;
+        }
+    }
+
+    /// Insert a translation with explicit parameters.
+    /// Overwrites any existing entry at the same index (direct-mapped).
+    #[inline]
+    pub fn insert_translation(
+        &mut self,
+        vpn: u64,
+        ppn: u64,
+        perm: u8,
+        level: u8,
+        asid: u16,
+    ) {
+        let idx = (vpn as usize) & TLB_MASK;
+        // SAFETY: idx is always < TLB_SIZE due to the bitmask
+        unsafe {
+            *self.entries.get_unchecked_mut(idx) = TlbEntry {
+                vpn,
+                ppn,
+                asid,
+                perm,
+                level,
+                valid: true,
+            };
+        }
     }
 }
 
@@ -221,19 +366,37 @@ pub fn translate(
             continue;
         }
 
-        // Leaf PTE.
+        // Leaf PTE - extract permission bits into packed format
+        let mut perm: u8 = 0;
+        if r != 0 {
+            perm |= PERM_R;
+        }
+        if w != 0 {
+            perm |= PERM_W;
+        }
+        if x != 0 {
+            perm |= PERM_X;
+        }
+        if (pte >> 4) & 1 != 0 {
+            perm |= PERM_U;
+        }
+        if (pte >> 5) & 1 != 0 {
+            perm |= PERM_G;
+        }
+        if (pte >> 6) & 1 != 0 {
+            perm |= PERM_A;
+        }
+        if (pte >> 7) & 1 != 0 {
+            perm |= PERM_D;
+        }
+
         let mut entry = TlbEntry {
             vpn: vpn_full,
             ppn: (pte >> 10) & 0xFFF_FFFF_FFFF,
+            asid: current_asid as u16,
+            perm,
+            level: i as u8,
             valid: true,
-            asid: current_asid,
-            global: (pte >> 5) & 1 != 0, // G bit
-            r: r != 0,
-            w: w != 0,
-            x: x != 0,
-            u: (pte >> 4) & 1 != 0,
-            a: (pte >> 6) & 1 != 0,
-            d: (pte >> 7) & 1 != 0,
         };
 
         if !check_permission_tlb(mode, mstatus, &entry, access_type) {
@@ -253,14 +416,14 @@ pub fn translate(
         let mut new_pte = pte;
         let mut update = false;
 
-        if !entry.a {
+        if !entry.a() {
             new_pte |= 1 << 6;
-            entry.a = true;
+            entry.set_a();
             update = true;
         }
-        if matches!(access_type, AccessType::Store) && !entry.d {
+        if matches!(access_type, AccessType::Store) && !entry.d() {
             new_pte |= 1 << 7;
-            entry.d = true;
+            entry.set_d();
             update = true;
         }
 
@@ -294,7 +457,7 @@ fn check_permission_tlb(mode: Mode, mstatus: u64, entry: &TlbEntry, access_type:
 
     match mode {
         Mode::Supervisor => {
-            if entry.u {
+            if entry.u() {
                 if matches!(access_type, AccessType::Instruction) {
                     return false;
                 }
@@ -304,7 +467,7 @@ fn check_permission_tlb(mode: Mode, mstatus: u64, entry: &TlbEntry, access_type:
             }
         }
         Mode::User => {
-            if !entry.u {
+            if !entry.u() {
                 return false;
             }
         }
@@ -312,13 +475,13 @@ fn check_permission_tlb(mode: Mode, mstatus: u64, entry: &TlbEntry, access_type:
     }
 
     match access_type {
-        AccessType::Instruction => entry.x,
-        AccessType::Store => entry.w,
+        AccessType::Instruction => entry.x(),
+        AccessType::Store => entry.w(),
         AccessType::Load => {
-            if entry.r {
+            if entry.r() {
                 true
             } else {
-                mxr == 1 && entry.x
+                mxr == 1 && entry.x()
             }
         }
     }

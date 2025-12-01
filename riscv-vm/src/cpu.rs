@@ -10,6 +10,20 @@ use crate::mmu::{self, AccessType as MmuAccessType, Tlb};
 use crate::Trap;
 use std::collections::HashMap;
 
+/// Cached decode result.
+/// Stores (pc, raw_instruction, decoded_op) for cache hit checking.
+type DecodeCacheEntry = (u64, u32, Op);
+
+/// Cache size (power of 2 for fast modulo)
+const DECODE_CACHE_SIZE: usize = 256;
+const DECODE_CACHE_MASK: usize = DECODE_CACHE_SIZE - 1;
+
+/// RISC-V CPU core.
+///
+/// Aligned to 128 bytes to prevent false sharing when multiple CPUs are
+/// allocated in an array or Vec. Most x86-64 cache lines are 64 bytes,
+/// but Apple M1/M2 uses 128-byte cache lines.
+#[repr(align(128))]
 pub struct Cpu {
     pub regs: [u64; 32],
     pub pc: u64,
@@ -24,6 +38,10 @@ pub struct Cpu {
     /// Poll counter for batching interrupt checks (rolls over every 256 instructions).
     /// Exposed for testing to force immediate interrupt polling.
     pub poll_counter: u8,
+    /// Instruction decode cache.
+    /// Key: pc & DECODE_CACHE_MASK
+    /// Value: Some((full_pc, raw_insn, decoded_op)) or None
+    decode_cache: [Option<DecodeCacheEntry>; DECODE_CACHE_SIZE],
 }
 
 impl Cpu {
@@ -50,6 +68,7 @@ impl Cpu {
             mode: Mode::Machine,
             tlb: Tlb::new(),
             poll_counter: 0,
+            decode_cache: [None; DECODE_CACHE_SIZE],
         }
     }
 
@@ -78,6 +97,30 @@ impl Cpu {
                 self.csrs[idx] = val;
             }
         }
+    }
+
+    /// Look up instruction in decode cache
+    #[inline]
+    fn decode_cache_lookup(&self, pc: u64, raw: u32) -> Option<Op> {
+        let idx = (pc as usize) & DECODE_CACHE_MASK;
+        if let Some((cached_pc, cached_raw, op)) = self.decode_cache[idx] {
+            if cached_pc == pc && cached_raw == raw {
+                return Some(op);
+            }
+        }
+        None
+    }
+
+    /// Insert decoded instruction into cache
+    #[inline]
+    fn decode_cache_insert(&mut self, pc: u64, raw: u32, op: Op) {
+        let idx = (pc as usize) & DECODE_CACHE_MASK;
+        self.decode_cache[idx] = Some((pc, raw, op));
+    }
+
+    /// Invalidate entire decode cache (call on TLB flush, context switch)
+    pub fn invalidate_decode_cache(&mut self) {
+        self.decode_cache = [None; DECODE_CACHE_SIZE];
     }
 
     pub fn read_reg(&self, reg: Register) -> u64 {
@@ -512,10 +555,18 @@ impl Cpu {
         let pc = self.pc;
         // Fetch (supports compressed 16-bit and regular 32-bit instructions)
         let (insn_raw, insn_len) = self.fetch_and_expand(bus)?;
-        // Decode
-        let op = match decoder::decode(insn_raw) {
-            Ok(v) => v,
-            Err(trap) => return self.handle_trap(trap, pc, Some(insn_raw)),
+
+        // Try decode cache first
+        let op = if let Some(cached_op) = self.decode_cache_lookup(pc, insn_raw) {
+            cached_op
+        } else {
+            // Cache miss: decode and insert
+            let op = match decoder::decode(insn_raw) {
+                Ok(v) => v,
+                Err(trap) => return self.handle_trap(trap, pc, Some(insn_raw)),
+            };
+            self.decode_cache_insert(pc, insn_raw, op);
+            op
         };
 
         let mut next_pc = pc.wrapping_add(insn_len as u64);
@@ -1118,6 +1169,8 @@ impl Cpu {
                             }
                             // Simplest implementation: flush entire TLB.
                             self.tlb.flush();
+                            // Also invalidate decode cache (PC->PA mappings may have changed)
+                            self.invalidate_decode_cache();
                         } else {
                             match insn_raw {
                                 0x0010_0073 => {
@@ -1125,7 +1178,13 @@ impl Cpu {
                                     return self.handle_trap(Trap::Breakpoint, pc, Some(insn_raw));
                                 }
                                 0x1050_0073 => {
-                                    // WFI - treat as a hint NOP
+                                    // WFI - Wait For Interrupt
+                                    // Instead of busy-spinning, hint to the CPU to reduce power usage.
+                                    // This uses the PAUSE instruction on x86 or equivalent on other archs.
+                                    // Multiple iterations give the scheduler a chance to run other threads.
+                                    for _ in 0..10 {
+                                        std::hint::spin_loop();
+                                    }
                                 }
                                 0x0000_0073 => {
                                     // ECALL - route based on current privilege mode
@@ -1266,6 +1325,11 @@ impl Cpu {
                             if let Err(e) = self.write_csr(csr_addr, new_val) {
                                 return self.handle_trap(e, pc, Some(insn_raw));
                             }
+                            // Invalidate decode cache if SATP changed (address space switch)
+                            if csr_addr == CSR_SATP {
+                                self.tlb.flush();
+                                self.invalidate_decode_cache();
+                            }
                         }
 
                         if rd != Register::X0 {
@@ -1295,6 +1359,61 @@ impl Cpu {
 mod tests {
     use super::*;
     use crate::bus::SystemBus;
+
+    // --- Memory layout tests (Task 10.1) ---------------------------------
+
+    #[test]
+    fn measure_struct_sizes() {
+        println!("=== Phase 10 Memory Layout Analysis ===");
+        println!("Cpu size: {} bytes", std::mem::size_of::<Cpu>());
+        println!("Cpu align: {} bytes", std::mem::align_of::<Cpu>());
+        println!();
+
+        // Verify cache-line alignment for multi-hart safety
+        assert!(
+            std::mem::align_of::<Cpu>() >= 64,
+            "Cpu should be cache-line aligned (>= 64 bytes)"
+        );
+    }
+
+    #[test]
+    fn test_cpu_alignment() {
+        // Verify Cpu is properly aligned for cache-line isolation
+        assert!(
+            std::mem::align_of::<Cpu>() >= 64,
+            "Cpu alignment should be at least 64 bytes for cache-line isolation"
+        );
+
+        // On Apple Silicon, cache lines are 128 bytes, so we align to 128
+        assert_eq!(
+            std::mem::align_of::<Cpu>(),
+            128,
+            "Cpu should be aligned to 128 bytes for Apple M1/M2 compatibility"
+        );
+    }
+
+    #[test]
+    fn test_cpu_array_no_false_sharing() {
+        // Create multiple CPUs in a Vec to simulate multi-hart scenario
+        let cpus: Vec<Cpu> = (0..4)
+            .map(|i| Cpu::new(0x8000_0000, i as u64))
+            .collect();
+
+        // Verify that adjacent CPUs are at least 64 bytes apart (one cache line)
+        for i in 0..cpus.len() - 1 {
+            let addr_i = &cpus[i] as *const _ as usize;
+            let addr_j = &cpus[i + 1] as *const _ as usize;
+            let distance = addr_j - addr_i;
+
+            assert!(
+                distance >= 64,
+                "CPUs {} and {} are only {} bytes apart (need >= 64 for cache-line isolation)",
+                i,
+                i + 1,
+                distance
+            );
+        }
+    }
 
     // --- Test helpers ----------------------------------------------------
 

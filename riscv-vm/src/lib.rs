@@ -8,6 +8,8 @@ pub mod clint;
 pub mod plic;
 pub mod uart;
 pub mod net;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod net_async;
 pub mod net_webtransport;
 pub mod virtio;
 pub mod emulator;

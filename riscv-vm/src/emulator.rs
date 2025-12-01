@@ -5,7 +5,7 @@ use goblin::elf::{program_header::PT_LOAD, Elf};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -21,22 +21,32 @@ use crate::console::Console;
 ///
 /// This struct is wrapped in Arc and shared across all threads.
 /// All fields use atomics for lock-free synchronization.
+///
+/// Aligned to 64 bytes to prevent false sharing with adjacent data.
+/// Combined flags into a single atomic for faster polling.
+#[repr(align(64))]
 pub struct SharedState {
-    /// Request all threads to stop.
-    halt_requested: AtomicBool,
-    /// A thread has encountered a fatal error or shutdown.
-    halted: AtomicBool,
+    /// Combined flags: bit 0 = halt_requested, bit 1 = halted
+    /// Using a single atomic reduces should_stop() from 2 loads to 1.
+    flags: AtomicU8,
     /// Halt code (e.g., from TEST_FINISHER).
     halt_code: AtomicU64,
+    /// Padding to prevent false sharing with adjacent data.
+    _padding: [u8; 64 - std::mem::size_of::<AtomicU8>() - std::mem::size_of::<AtomicU64>()],
 }
 
 impl SharedState {
+    /// Flag bit for halt_requested
+    const HALT_REQUESTED: u8 = 0x01;
+    /// Flag bit for halted
+    const HALTED: u8 = 0x02;
+
     /// Create new shared state.
     pub fn new() -> Self {
         Self {
-            halt_requested: AtomicBool::new(false),
-            halted: AtomicBool::new(false),
+            flags: AtomicU8::new(0),
             halt_code: AtomicU64::new(0),
+            _padding: [0; 64 - std::mem::size_of::<AtomicU8>() - std::mem::size_of::<AtomicU64>()],
         }
     }
 
@@ -44,25 +54,25 @@ impl SharedState {
     pub fn request_halt(&self) {
         // Use Release ordering - ensures all prior writes are visible
         // before the halt flag becomes visible
-        self.halt_requested.store(true, Ordering::Release);
+        self.flags.fetch_or(Self::HALT_REQUESTED, Ordering::Release);
     }
 
     /// Check if halt has been requested.
     pub fn is_halt_requested(&self) -> bool {
         // Use Relaxed - we just need to eventually see the flag
-        self.halt_requested.load(Ordering::Relaxed)
+        (self.flags.load(Ordering::Relaxed) & Self::HALT_REQUESTED) != 0
     }
 
     /// Signal that a thread has halted (e.g., due to trap).
     pub fn signal_halted(&self, code: u64) {
         self.halt_code.store(code, Ordering::Relaxed);
         // Use Release for the halted flag to ensure halt_code is visible
-        self.halted.store(true, Ordering::Release);
+        self.flags.fetch_or(Self::HALTED, Ordering::Release);
     }
 
     /// Check if any thread has halted.
     pub fn is_halted(&self) -> bool {
-        self.halted.load(Ordering::Relaxed)
+        (self.flags.load(Ordering::Relaxed) & Self::HALTED) != 0
     }
 
     /// Get the halt code.
@@ -73,12 +83,13 @@ impl SharedState {
 
     /// Check if we should stop (either requested or already halted).
     /// 
-    /// Performance note: This is called on every instruction, so we use
-    /// Relaxed ordering. The flags will eventually become visible.
+    /// Performance note: This is called frequently, so we use Relaxed ordering
+    /// and a single atomic load (combined flags). The flags will eventually
+    /// become visible.
     #[inline(always)]
     pub fn should_stop(&self) -> bool {
-        // Use Relaxed - we're polling frequently enough that eventual consistency is fine
-        self.halt_requested.load(Ordering::Relaxed) || self.halted.load(Ordering::Relaxed)
+        // Single atomic load instead of two - faster polling
+        self.flags.load(Ordering::Relaxed) != 0
     }
 }
 
@@ -561,6 +572,94 @@ mod tests {
     use super::*;
     use crate::bus::Bus;
 
+    // --- Memory layout tests (Task 10.1/10.4) ---
+
+    #[test]
+    fn measure_shared_state_size() {
+        use crate::cpu::Cpu;
+        use crate::bus::SystemBus;
+        use crate::clint::Clint;
+        use crate::plic::Plic;
+
+        println!("=== Phase 10 Memory Layout Analysis ===");
+        println!("Cpu size: {} bytes", std::mem::size_of::<Cpu>());
+        println!("Cpu align: {} bytes", std::mem::align_of::<Cpu>());
+        println!("SharedState size: {} bytes", std::mem::size_of::<SharedState>());
+        println!("SharedState align: {} bytes", std::mem::align_of::<SharedState>());
+        println!("SystemBus size: {} bytes", std::mem::size_of::<SystemBus>());
+        println!("Clint size: {} bytes", std::mem::size_of::<Clint>());
+        println!("Plic size: {} bytes", std::mem::size_of::<Plic>());
+    }
+
+    #[test]
+    fn test_shared_state_alignment() {
+        // SharedState should be cache-line aligned (64 bytes)
+        assert_eq!(
+            std::mem::align_of::<SharedState>(),
+            64,
+            "SharedState should be aligned to 64 bytes"
+        );
+
+        // Size should be exactly 64 bytes (one cache line)
+        assert_eq!(
+            std::mem::size_of::<SharedState>(),
+            64,
+            "SharedState should be exactly 64 bytes (one cache line)"
+        );
+    }
+
+    #[test]
+    fn test_shared_state_should_stop() {
+        let state = SharedState::new();
+
+        // Initially not stopped
+        assert!(!state.should_stop());
+        assert!(!state.is_halt_requested());
+        assert!(!state.is_halted());
+
+        // Request halt
+        state.request_halt();
+        assert!(state.should_stop());
+        assert!(state.is_halt_requested());
+        assert!(!state.is_halted());
+
+        // Reset for next test (create new instance)
+        let state2 = SharedState::new();
+        assert!(!state2.should_stop());
+
+        // Signal halted
+        state2.signal_halted(42);
+        assert!(state2.should_stop());
+        assert!(!state2.is_halt_requested());
+        assert!(state2.is_halted());
+        assert_eq!(state2.halt_code(), 42);
+    }
+
+    #[test]
+    fn test_shared_state_concurrent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let state = Arc::new(SharedState::new());
+        let mut handles = vec![];
+
+        // Spawn multiple threads polling should_stop
+        for _ in 0..4 {
+            let state_clone = Arc::clone(&state);
+            let handle = thread::spawn(move || {
+                for _ in 0..100_000 {
+                    let _ = state_clone.should_stop();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // All threads should complete without panic
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
     #[test]
     fn snapshot_roundtrip_preserves_state() {
         let mut emu = Emulator::with_memory(1024 * 1024);
@@ -576,7 +675,7 @@ mod tests {
         {
             let mut mtimecmp = emu.bus.clint.get_mtimecmp_array();
             mtimecmp[0] = 5678;
-            emu.bus.clint.set_mtimecmp_array(mtimecmp);
+            emu.bus.clint.set_mtimecmp_array(&mtimecmp);
         }
         emu.bus.uart.push_input(b'A');
 
@@ -673,6 +772,15 @@ fn load_elf_into_dram(
 // NativeVm - Multi-threaded VM for native execution
 // ============================================================================
 
+/// Reason for halting batch execution.
+#[cfg(not(target_arch = "wasm32"))]
+enum HaltReason {
+    /// VM shutdown requested (e.g., via TEST_FINISHER)
+    Shutdown(u64),
+    /// Fatal emulator error (message, PC)
+    Fatal(String, u64),
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 /// Native multi-threaded VM.
 ///
@@ -763,16 +871,22 @@ impl NativeVm {
     /// Connect to a WebTransport relay for networking.
     ///
     /// Must be called before `run()` / `start_workers()`.
+    /// The network backend is automatically wrapped in `AsyncNetworkBackend`
+    /// for non-blocking I/O and better performance.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn connect_webtransport(&mut self, url: &str, cert_hash: Option<String>) {
+        use crate::net_async::AsyncNetworkBackend;
         use crate::net_webtransport::WebTransportBackend;
         use crate::virtio::VirtioNet;
 
         if let Some(bus) = Arc::get_mut(&mut self.bus) {
+            // Create the WebTransport backend
             let backend = WebTransportBackend::new(url, cert_hash);
-            let vnet = VirtioNet::new(Box::new(backend));
+            // Wrap in async backend for non-blocking I/O
+            let async_backend = AsyncNetworkBackend::new(Box::new(backend));
+            let vnet = VirtioNet::new(Box::new(async_backend));
             bus.virtio_devices.push(Box::new(vnet));
-            println!("[VM] WebTransport network configured: {}", url);
+            println!("[VM] WebTransport network configured (async): {}", url);
         } else {
             eprintln!("[VM] Cannot configure network: workers already running");
         }
@@ -845,25 +959,50 @@ impl NativeVm {
 
         println!("[VM] Running hart 0 on main thread...");
 
-        // Batch size for halt checking - reduces atomic load frequency
-        // Check less frequently since should_stop() is now cheap (Relaxed ordering)
-        // Higher values = better performance, lower responsiveness to halt
-        const HALT_CHECK_INTERVAL: u64 = 16384;
-        // I/O polling interval - balance between responsiveness and throughput
-        // Console/VirtIO polling is relatively expensive, so do it less often
-        const IO_POLL_INTERVAL: u64 = 32768;
+        // Batch execution parameters
+        // Execute instructions in batches to reduce loop overhead
+        const BATCH_SIZE: u64 = 256;
+        // VirtIO poll interval - with async backend, polling is non-blocking
+        // so we can poll more frequently for better network latency
+        const VIRTIO_POLL_INTERVAL: u64 = 4096;
+        // Console poll interval - console I/O has more overhead
+        const CONSOLE_POLL_INTERVAL: u64 = 16384;
 
         loop {
-            // Batch halt checking - only check every N instructions
-            if step_count % HALT_CHECK_INTERVAL == 0 && self.shared.should_stop() {
+            // Check halt before batch
+            if self.shared.should_stop() {
                 break;
             }
 
-            // Poll I/O periodically
-            if step_count % IO_POLL_INTERVAL == 0 {
+            // Execute a batch of instructions
+            let (batch_steps, halt_reason) = self.execute_batch(&mut cpu, BATCH_SIZE);
+            step_count += batch_steps;
+
+            // Handle halt reason from batch
+            if let Some(reason) = halt_reason {
+                match reason {
+                    HaltReason::Shutdown(code) => {
+                        println!("[VM] Shutdown requested (code: {:#x})", code);
+                        self.shared.signal_halted(code);
+                        break;
+                    }
+                    HaltReason::Fatal(msg, pc) => {
+                        eprintln!("[VM] Fatal error: {} at PC=0x{:x}", msg, pc);
+                        self.shared.signal_halted(0xDEAD);
+                        break;
+                    }
+                }
+            }
+
+            // Poll VirtIO more frequently (non-blocking with async backend)
+            if step_count % VIRTIO_POLL_INTERVAL == 0 {
                 self.bus.poll_virtio();
+            }
+
+            // Poll console less frequently (has more overhead)
+            if step_count % CONSOLE_POLL_INTERVAL == 0 {
                 self.pump_console(&console, &mut escaped);
-                
+
                 // Periodic performance report (debug mode)
                 if log::log_enabled!(log::Level::Debug) {
                     let now = Instant::now();
@@ -886,27 +1025,6 @@ impl NativeVm {
                     }
                 }
             }
-
-            // Execute primary hart
-            match cpu.step(&*self.bus) {
-                Ok(()) => {
-                    step_count += 1;
-                }
-                Err(Trap::RequestedTrap(code)) => {
-                    println!("[VM] Shutdown requested (code: {:#x})", code);
-                    self.shared.signal_halted(code);
-                    break;
-                }
-                Err(Trap::Fatal(msg)) => {
-                    eprintln!("[VM] Fatal error: {} at PC=0x{:x}", msg, cpu.pc);
-                    self.shared.signal_halted(0xDEAD);
-                    break;
-                }
-                Err(_trap) => {
-                    // Architectural traps handled by CPU
-                    step_count += 1;
-                }
-            }
         }
 
         // Clean up
@@ -924,6 +1042,34 @@ impl NativeVm {
             step_count,
             ips / 1_000_000.0
         );
+    }
+
+    /// Execute a batch of instructions.
+    ///
+    /// Returns the number of steps executed and an optional halt reason.
+    /// This reduces per-instruction overhead by checking conditions less frequently.
+    fn execute_batch(&self, cpu: &mut Cpu, max_steps: u64) -> (u64, Option<HaltReason>) {
+        let mut count = 0u64;
+
+        for _ in 0..max_steps {
+            match cpu.step(&*self.bus) {
+                Ok(()) => {
+                    count += 1;
+                }
+                Err(Trap::RequestedTrap(code)) => {
+                    return (count, Some(HaltReason::Shutdown(code)));
+                }
+                Err(Trap::Fatal(msg)) => {
+                    return (count, Some(HaltReason::Fatal(msg, cpu.pc)));
+                }
+                Err(_trap) => {
+                    // Architectural traps handled by CPU
+                    count += 1;
+                }
+            }
+        }
+
+        (count, None)
     }
 
     /// Pump console I/O.
@@ -1073,49 +1219,45 @@ fn hart_thread(hart_id: usize, entry_pc: u64, bus: Arc<SystemBus>, shared: Arc<S
 
     println!("[Hart {}] Started at PC=0x{:x}", hart_id, entry_pc);
 
-    // Batch size for halt checking - reduces atomic load frequency
-    // Check less frequently since should_stop() is now cheap (Relaxed ordering)
-    // Higher values = better performance but slower halt response
-    const HALT_CHECK_INTERVAL: u64 = 16384;
+    // Batch execution parameters
+    const BATCH_SIZE: u64 = 256;
     // Yield interval - allow other threads to run
     // Higher value = better throughput but potentially less fair scheduling
-    // Modern OSes handle this well, so we can be aggressive
     const YIELD_INTERVAL: u64 = 4_000_000;
 
     loop {
-        // Batch halt checking - only check every N instructions
-        if step_count % HALT_CHECK_INTERVAL == 0 && shared.should_stop() {
+        // Check halt before batch
+        if shared.should_stop() {
             break;
         }
 
-        // Execute one instruction
-        match cpu.step(&*bus) {
-            Ok(()) => {
-                step_count += 1;
-            }
-            Err(Trap::RequestedTrap(code)) => {
-                println!(
-                    "[Hart {}] Shutdown requested (code: {:#x})",
-                    hart_id, code
-                );
-                shared.signal_halted(code);
-                break;
-            }
-            Err(Trap::Fatal(msg)) => {
-                eprintln!("[Hart {}] Fatal: {} at PC=0x{:x}", hart_id, msg, cpu.pc);
-                shared.signal_halted(0xDEAD);
-                break;
-            }
-            Err(_trap) => {
-                // Architectural traps handled by CPU
-                step_count += 1;
+        // Execute a batch of instructions
+        let (batch_steps, halt_reason) = execute_batch_worker(&mut cpu, &bus, BATCH_SIZE);
+        step_count += batch_steps;
+
+        // Handle halt reason from batch
+        if let Some(reason) = halt_reason {
+            match reason {
+                HaltReason::Shutdown(code) => {
+                    println!(
+                        "[Hart {}] Shutdown requested (code: {:#x})",
+                        hart_id, code
+                    );
+                    shared.signal_halted(code);
+                    break;
+                }
+                HaltReason::Fatal(msg, pc) => {
+                    eprintln!("[Hart {}] Fatal: {} at PC=0x{:x}", hart_id, msg, pc);
+                    shared.signal_halted(0xDEAD);
+                    break;
+                }
             }
         }
 
         // Yield occasionally to prevent CPU hogging and reduce contention
         if step_count % YIELD_INTERVAL == 0 {
             thread::yield_now();
-            
+
             // Periodic performance report (debug mode)
             if log::log_enabled!(log::Level::Debug) {
                 let now = Instant::now();
@@ -1154,5 +1296,33 @@ fn hart_thread(hart_id: usize, entry_pc: u64, bus: Arc<SystemBus>, shared: Arc<S
         step_count,
         ips / 1_000_000.0
     );
+}
+
+/// Execute a batch of instructions for worker threads.
+///
+/// Similar to NativeVm::execute_batch but takes bus reference directly.
+#[cfg(not(target_arch = "wasm32"))]
+fn execute_batch_worker(cpu: &mut Cpu, bus: &SystemBus, max_steps: u64) -> (u64, Option<HaltReason>) {
+    let mut count = 0u64;
+
+    for _ in 0..max_steps {
+        match cpu.step(bus) {
+            Ok(()) => {
+                count += 1;
+            }
+            Err(Trap::RequestedTrap(code)) => {
+                return (count, Some(HaltReason::Shutdown(code)));
+            }
+            Err(Trap::Fatal(msg)) => {
+                return (count, Some(HaltReason::Fatal(msg, cpu.pc)));
+            }
+            Err(_trap) => {
+                // Architectural traps handled by CPU
+                count += 1;
+            }
+        }
+    }
+
+    (count, None)
 }
 

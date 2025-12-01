@@ -3,6 +3,8 @@
 //! This module defines the `NetworkBackend` trait that abstracts packet I/O
 //! to support both Host (TAP) and WASM (WebSocket) environments.
 
+use std::time::Duration;
+
 /// Trait for network backends that provide packet I/O.
 /// 
 /// Implementations must be `Send` to allow the backend to be used
@@ -29,6 +31,17 @@ pub trait NetworkBackend: Send {
     /// Returns None if no IP has been assigned yet.
     fn get_assigned_ip(&self) -> Option<[u8; 4]> {
         None
+    }
+
+    /// Receive with timeout (for async wrapper).
+    ///
+    /// Waits up to `timeout` for an incoming packet. Returns `Ok(Some(packet))`
+    /// if a packet is received, `Ok(None)` if the timeout expires, or an error.
+    ///
+    /// Default implementation ignores the timeout and just calls `recv()`.
+    /// Backends that support blocking with timeout should override this.
+    fn receive_timeout(&mut self, _timeout: Duration) -> Result<Option<Vec<u8>>, String> {
+        self.recv()
     }
 }
 

@@ -186,12 +186,14 @@ impl SystemBus {
         }
 
         // SEIP (Supervisor External Interrupt) - Bit 9
-        if self.plic.is_interrupt_pending_for(Plic::s_context(hart_id)) {
+        // Use fast lock-free check
+        if self.plic.is_interrupt_pending_for_fast(Plic::s_context(hart_id)) {
             mip |= 1 << 9;
         }
 
         // MEIP (Machine External Interrupt) - Bit 11
-        if self.plic.is_interrupt_pending_for(Plic::m_context(hart_id)) {
+        // Use fast lock-free check
+        if self.plic.is_interrupt_pending_for_fast(Plic::m_context(hart_id)) {
             mip |= 1 << 11;
         }
 
