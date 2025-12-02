@@ -1,3 +1,13 @@
+## 0.0.37 (2025-12-02)
+
+### 🩹 Fixes
+
+- improve hart performance on browsers and nodejs Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([7111c0b](https://github.com/elribonazo/riscv-vm/commit/7111c0b))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.36 (2025-12-02)
 
 ### 🩹 Fixes
