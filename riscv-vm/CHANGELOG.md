@@ -1,3 +1,13 @@
+## 0.1.0 (2025-12-02)
+
+### 🚀 Features
+
+- hotpaths improvement on CPU, great performance Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([68c37bd](https://github.com/elribonazo/riscv-vm/commit/68c37bd))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.37 (2025-12-02)
 
 ### 🩹 Fixes
