@@ -1,3 +1,13 @@
+## 0.1.8 (2025-12-02)
+
+### 🩹 Fixes
+
+- kernel Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([cde95d5](https://github.com/elribonazo/riscv-vm/commit/cde95d5))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.1.7 (2025-12-02)
 
 This was a version bump only for kernel to align it with other projects, there were no code changes.
