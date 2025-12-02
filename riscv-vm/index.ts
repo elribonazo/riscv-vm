@@ -43,6 +43,10 @@ export interface VmOptions {
  * If SharedArrayBuffer is available (requires COOP/COEP headers), the VM
  * will run in true parallel mode with Web Workers for secondary harts.
  *
+ * NOTE: In WASM, multi-hart mode is significantly slower due to
+ * SharedArrayBuffer/Atomics overhead (see tasks/improvements.md).
+ * Default is 1 hart unless explicitly specified.
+ *
  * @param kernelData - ELF kernel binary
  * @param options - VM configuration options
  * @returns WasmVm instance
@@ -53,9 +57,15 @@ export async function createVM(
 ): Promise<import("./pkg/riscv_vm").WasmVm> {
   const module = await WasmInternal();
 
+  // In WASM, default to 1 hart due to SharedArrayBuffer/Atomics overhead
+  // Multi-hart mode is ~8x slower than single hart (see tasks/improvements.md)
+  // Users can explicitly request multiple harts if needed
+  const defaultHarts = typeof window !== 'undefined' ? 1 : undefined;
+  const harts = options.harts ?? defaultHarts;
+
   // Create VM with specified hart count (0 = auto-detect)
-  const vm = options.harts !== undefined && options.harts > 0
-    ? module.WasmVm.new_with_harts(kernelData, options.harts)
+  const vm = harts !== undefined && harts > 0
+    ? module.WasmVm.new_with_harts(kernelData, harts)
     : new module.WasmVm(kernelData);
 
   // Start workers if in SMP mode

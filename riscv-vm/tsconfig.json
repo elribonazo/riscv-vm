@@ -14,6 +14,6 @@
     "strict": true,
     "lib": ["ES2022", "DOM", ],
   },
-  "include": ["pkg", "index.ts", "worker.ts", "cli.ts"],
+  "include": ["pkg", "index.ts", "worker.ts", "cli.ts","node-worker.ts"],
   "exclude": ["node_modules", "build"]
 }

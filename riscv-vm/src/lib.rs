@@ -651,6 +651,23 @@ impl WasmVm {
         self.shared_buffer.clone()
     }
     
+    /// Get the entry PC address for workers.
+    /// This is the address where secondary harts should start executing.
+    pub fn entry_pc(&self) -> u64 {
+        self.entry_pc
+    }
+    
+    /// Signal that workers can start executing.
+    /// Called by the main thread after hart 0 has finished initializing
+    /// kernel data structures.
+    pub fn allow_workers_to_start(&mut self) {
+        if let Some(ref control) = self.shared_control {
+            control.allow_workers_to_start();
+            self.workers_signaled = true;
+            web_sys::console::log_1(&JsValue::from_str("[VM] Workers signaled to start"));
+        }
+    }
+    
     /// Terminate all workers.
     pub fn terminate_workers(&mut self) {
         // Signal halt to workers

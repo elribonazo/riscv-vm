@@ -77,6 +77,9 @@ export type WorkerOutboundMessage =
 const CTRL_HALT_REQUESTED = 0;
 const CTRL_HALTED = 1;
 
+/** Shared control view for Atomics operations */
+let controlView: Int32Array | null = null;
+
 // ============================================================================
 // Worker Context
 // ============================================================================
@@ -93,58 +96,87 @@ declare const self: WorkerGlobalScope;
 let initialized = false;
 let currentHartId: number | undefined;
 let workerState: WorkerState | null = null;
-let runLoopId: number | null = null;
 
-// Tuning parameters for cooperative scheduling
-const BATCH_SIZE = 1024;         // Instructions per batch
-const YIELD_INTERVAL_MS = 0;     // Yield after each batch (setTimeout(0) yields to event loop)
+// Tuning parameters for execution
+// Performance Note: Higher BATCH_SIZE reduces JS/WASM boundary crossing overhead.
+// Combined with BATCHES_PER_YIELD, this determines how often we check for halt signals.
+const BATCH_SIZE = 100_000;      // Instructions per batch (was 1024)
 
 /**
- * Run loop using cooperative scheduling.
- * Executes a batch of instructions, then yields to the event loop.
- * This prevents the worker from blocking and allows it to respond to messages.
+ * Run loop using optimized blocking execution with periodic yields.
+ * 
+ * This replaces the previous setTimeout-based approach which had significant
+ * overhead (~4ms minimum delay per batch in browsers). Instead, we:
+ * 1. Execute multiple batches in a tight loop
+ * 2. Use Atomics.wait with 0ms timeout to efficiently yield
+ * 3. Only check for halt signals periodically
+ * 
+ * This significantly reduces scheduling overhead while still allowing
+ * the worker to respond to external signals.
  */
 function runLoop() {
-  if (!workerState || currentHartId === undefined) {
-    console.error('[Worker] runLoop called without workerState or hartId');
+  if (!workerState || currentHartId === undefined || !controlView) {
+    console.error('[Worker] runLoop called without workerState, hartId, or controlView');
     return;
   }
   
   const hartId = currentHartId; // Capture for type narrowing
-  const result = workerState.step_batch(BATCH_SIZE);
   
-  switch (result) {
-    case WorkerStepResult.Continue:
-      // Schedule next batch - use setTimeout(0) to yield to event loop
-      runLoopId = setTimeout(runLoop, YIELD_INTERVAL_MS) as unknown as number;
-      break;
-      
-    case WorkerStepResult.Halted:
-      console.log(`[Worker ${hartId}] Halted after ${workerState.step_count()} steps`);
-      self.postMessage({ type: "halted", hartId });
-      cleanup();
-      break;
-      
-    case WorkerStepResult.Shutdown:
-      console.log(`[Worker ${hartId}] Shutdown after ${workerState.step_count()} steps`);
-      self.postMessage({ type: "halted", hartId });
-      cleanup();
-      break;
-      
-    case WorkerStepResult.Error:
-      console.error(`[Worker ${hartId}] Error after ${workerState.step_count()} steps`);
-      self.postMessage({ type: "error", hartId, error: "Execution error" });
-      cleanup();
-      break;
+  // Number of batches to execute before yielding
+  const BATCHES_PER_YIELD = 10;
+  
+  let shouldContinue = true;
+  let batchCount = 0;
+  
+  while (shouldContinue) {
+    const result = workerState.step_batch(BATCH_SIZE);
+    
+    switch (result) {
+      case WorkerStepResult.Continue:
+        batchCount++;
+        
+        // Yield periodically to allow halt signals to be processed
+        if (batchCount >= BATCHES_PER_YIELD) {
+          batchCount = 0;
+          
+          // Use Atomics.wait with 0ms timeout for efficient yielding
+          // This is much faster than setTimeout(0) which has ~4ms minimum delay
+          // Returns immediately but allows the thread to check for updates
+          try {
+            Atomics.wait(controlView, CTRL_HALT_REQUESTED, 0, 0);
+          } catch {
+            // Atomics.wait may not be available in all contexts, fall back gracefully
+          }
+        }
+        break;
+        
+      case WorkerStepResult.Halted:
+        console.log(`[Worker ${hartId}] Halted after ${workerState.step_count()} steps`);
+        self.postMessage({ type: "halted", hartId });
+        cleanup();
+        shouldContinue = false;
+        break;
+        
+      case WorkerStepResult.Shutdown:
+        console.log(`[Worker ${hartId}] Shutdown after ${workerState.step_count()} steps`);
+        self.postMessage({ type: "halted", hartId });
+        cleanup();
+        shouldContinue = false;
+        break;
+        
+      case WorkerStepResult.Error:
+        console.error(`[Worker ${hartId}] Error after ${workerState.step_count()} steps`);
+        self.postMessage({ type: "error", hartId, error: "Execution error" });
+        cleanup();
+        shouldContinue = false;
+        break;
+    }
   }
 }
 
 function cleanup() {
-  if (runLoopId !== null) {
-    clearTimeout(runLoopId);
-    runLoopId = null;
-  }
   workerState = null;
+  controlView = null;
 }
 
 self.onmessage = async (event: MessageEvent<WorkerInitMessage>) => {
@@ -205,10 +237,13 @@ self.onmessage = async (event: MessageEvent<WorkerInitMessage>) => {
     const pc = BigInt(Math.floor(entryPc));
     console.log(`[Worker ${hartId}] Starting execution at PC=0x${pc.toString(16)}`);
     
+    // Set up control view for efficient Atomics.wait-based yielding
+    controlView = new Int32Array(sharedMem);
+    
     // Create worker state for cooperative scheduling
     workerState = new WorkerState(hartId, sharedMem, pc);
     
-    // Start the cooperative run loop
+    // Start the optimized blocking run loop
     runLoop();
   } catch (e) {
     console.error(`[Worker ${hartId}] Execution error:`, e);

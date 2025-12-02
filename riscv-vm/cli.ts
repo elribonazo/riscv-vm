@@ -6,14 +6,22 @@
  * This CLI mirrors the native Rust VM CLI interface:
  * - loads a kernel image (ELF or raw binary) via --kernel/-k
  * - optionally loads a VirtIO block disk image (e.g. xv6 `fs.img`) via --disk/-d
- * - optionally specifies number of harts via --harts/-n
+ * - optionally specifies number of harts via --harts/-n (0 = auto-detect as CPU/2)
  * - can optionally connect to a network relay via --net-webtransport
  * - runs the VM in a tight loop
  * - connects stdin → UART input and UART output → stdout
+ *
+ * Multi-hart support:
+ * - Uses Node.js worker_threads for parallel execution
+ * - Hart 0 runs on main thread (handles I/O)
+ * - Harts 1+ run on worker threads
+ * - All harts share memory via SharedArrayBuffer
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
@@ -22,6 +30,15 @@ const DEFAULT_RELAY_URL =
   process.env.RELAY_URL || 'https://localhost:4433';
 const DEFAULT_CERT_HASH =
   process.env.RELAY_CERT_HASH || '';
+
+/**
+ * Auto-detect the number of harts based on CPU cores.
+ * Uses half of available cores, minimum 1.
+ */
+function detectHartCount(): number {
+  const cpus = os.cpus().length;
+  return Math.max(1, Math.floor(cpus / 2));
+}
 
 /**
  * Try to load the native WebTransport addon.
@@ -50,11 +67,12 @@ async function loadNativeWebTransport(): Promise<any | null> {
 }
 
 /**
- * Create and initialize a Wasm VM instance, mirroring the native VM:
+ * Create and initialize a Wasm VM instance with multi-hart support:
  * - initializes the WASM module once via `WasmInternal`
- * - constructs `WasmVm` with the kernel bytes
+ * - constructs `WasmVm` with the kernel bytes and specified hart count
  * - optionally attaches a VirtIO block device from a disk image
  * - optionally connects to a network relay (WebTransport/WebSocket)
+ * - starts worker threads for secondary harts
  */
 async function createVm(
   kernelPath: string,
@@ -96,16 +114,11 @@ async function createVm(
     throw new Error('WasmVm class not found in wasm module');
   }
 
-  // In Node.js CLI, multi-hart mode is not supported because WASM workers
-  // require browser Web Workers. Fall back to single-hart mode.
-  const requestedHarts = options?.harts ?? 1;
-  if (requestedHarts > 1) {
-    console.error('[CLI] Warning: Multi-hart mode (--harts > 1) is not supported in Node.js CLI');
-    console.error('[CLI] The WASM VM requires browser Web Workers for SMP. Falling back to single hart.');
-  }
-  
-  // Always use single hart in Node.js CLI
-  const vm = new VmCtor(kernelBytes);
+  // Create VM with requested number of harts
+  const numHarts = options?.harts ?? 1;
+  const vm = VmCtor.new_with_harts 
+    ? VmCtor.new_with_harts(kernelBytes, numHarts) 
+    : new VmCtor(kernelBytes);
 
   if (options?.disk) {
     const resolvedDisk = path.resolve(options.disk);
@@ -117,6 +130,60 @@ async function createVm(
       if (options?.debug) {
         console.error(`[VM] Loaded disk: ${resolvedDisk}`);
       }
+    }
+  }
+
+  // Start worker threads for secondary harts (1..numHarts)
+  const workers: Worker[] = [];
+  if (numHarts > 1 && typeof vm.get_shared_buffer === 'function') {
+    const sharedBuffer = vm.get_shared_buffer();
+    
+    if (sharedBuffer) {
+      // Get entry PC for workers
+      const entryPc = typeof (vm as any).entry_pc === 'function' ? (vm as any).entry_pc() : 0x80000000;
+      
+      // Path to WASM file and worker script
+      const wasmPath = path.resolve(__dirname, '..', 'pkg', 'riscv_vm_bg.wasm');
+      const workerPath = path.resolve(__dirname, 'node-worker.js');
+      
+      console.error(`[VM] Starting ${numHarts - 1} worker threads...`);
+      
+      for (let hartId = 1; hartId < numHarts; hartId++) {
+        const worker = new Worker(workerPath, {
+          workerData: {
+            hartId,
+            sharedMem: sharedBuffer,
+            entryPc: Number(entryPc),
+            wasmPath,
+          },
+        });
+        
+        worker.on('message', (msg: any) => {
+          if (msg.type === 'ready') {
+            console.error(`[VM] Worker ${msg.hartId} ready`);
+          } else if (msg.type === 'halted') {
+            console.error(`[VM] Worker ${msg.hartId} halted (${msg.stepCount} steps)`);
+          } else if (msg.type === 'error') {
+            console.error(`[VM] Worker ${msg.hartId} error: ${msg.error}`);
+          }
+        });
+        
+        worker.on('error', (err) => {
+          console.error(`[VM] Worker ${hartId} error:`, err);
+        });
+        
+        worker.on('exit', (code) => {
+          if (code !== 0) {
+            console.error(`[VM] Worker ${hartId} exited with code ${code}`);
+          }
+        });
+        
+        workers.push(worker);
+      }
+      
+      console.error(`[VM] Started ${workers.length} worker threads`);
+    } else {
+      console.error('[VM] Warning: SharedArrayBuffer not available, running single-threaded');
     }
   }
 
@@ -153,7 +220,7 @@ async function createVm(
     }
   }
 
-  return { vm, nativeNetClient };
+  return { vm, nativeNetClient, workers };
 }
 
 /**
@@ -162,14 +229,20 @@ async function createVm(
  * - drains the UART output buffer and writes to stdout
  * - feeds raw stdin bytes into the VM's UART input
  * - bridges packets between native WebTransport addon and VM
+ * - manages worker threads for secondary harts
  */
-function runVmLoop(vm: any, nativeNetClient: any | null) {
+function runVmLoop(vm: any, nativeNetClient: any | null, workers: Worker[] = []) {
   let running = true;
   let networkConnected = false;
 
   const shutdown = (code: number) => {
     if (!running) return;
     running = false;
+
+    // Terminate worker threads
+    for (const worker of workers) {
+      worker.terminate();
+    }
 
     // Shutdown native network client
     if (nativeNetClient) {
@@ -338,7 +411,7 @@ function printBanner(kernelPath: string, numHarts: number, netWebtransport?: str
   
   console.log();
   console.log('╔══════════════════════════════════════════════════════════════╗');
-  console.log('║              RISC-V Emulator (WASM Edition)                  ║');
+  console.log('║              RISC-V Emulator (WASM + Worker Threads)         ║');
   console.log('╠══════════════════════════════════════════════════════════════╣');
   console.log(`║  Kernel: ${kernelName.padEnd(50)} ║`);
   console.log(`║  Harts:  ${String(numHarts).padEnd(50)} ║`);
@@ -365,8 +438,8 @@ const argv = (yargs(hideBin(process.argv)) as any)
   .option('harts', {
     alias: 'n',
     type: 'number',
-    describe: 'Number of harts (ignored in CLI - multi-hart requires browser Web Workers)',
-    default: 1,
+    describe: 'Number of harts (0 = auto-detect as CPU/2)',
+    default: 0,
   })
   .option('net-webtransport', {
     type: 'string',
@@ -393,21 +466,32 @@ const argv = (yargs(hideBin(process.argv)) as any)
   const certHash = argv['cert-hash'] as string | undefined;
   const debug = argv.debug as boolean;
 
-  // Node.js CLI always uses single hart - multi-hart requires browser Web Workers
-  const numHarts = 1;
+  // Auto-detect harts if set to 0, otherwise use user-specified value
+  const numHarts = hartsArg === 0 ? detectHartCount() : hartsArg;
 
-  // Print banner (always shows 1 hart for CLI)
+  // Print banner
   printBanner(kernelPath, numHarts, netWebtransport);
 
   try {
-    const { vm, nativeNetClient } = await createVm(kernelPath, {
+    const { vm, nativeNetClient, workers } = await createVm(kernelPath, {
       disk: diskPath,
-      harts: hartsArg, // Pass the requested value so createVm can warn if > 1
+      harts: numHarts,
       netWebtransport,
       certHash,
       debug,
     });
-    runVmLoop(vm, nativeNetClient);
+    
+    // Signal workers that they can start executing
+    // This is done after the main hart has had a chance to initialize
+    if (typeof (vm as any).allow_workers_to_start === 'function') {
+      // Give hart 0 a head start to initialize kernel data structures
+      setTimeout(() => {
+        (vm as any).allow_workers_to_start();
+        console.error('[VM] Workers allowed to start');
+      }, 100);
+    }
+    
+    runVmLoop(vm, nativeNetClient, workers);
   } catch (err) {
     console.error('[CLI] Failed to start VM:', err);
     process.exit(1);

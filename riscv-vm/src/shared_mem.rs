@@ -512,6 +512,91 @@ pub mod wasm {
 
             write_idx != read_idx
         }
+        
+        /// Write multiple bytes to the shared UART output buffer.
+        /// This is more efficient than calling write_byte repeatedly as it
+        /// reduces atomic operations (only one index read/write per batch).
+        /// Returns the number of bytes successfully written.
+        pub fn write_bytes(&self, bytes: &[u8]) -> usize {
+            if bytes.is_empty() {
+                return 0;
+            }
+            
+            let write_idx_slot = self.uart_i32_index(UART_WRITE_IDX);
+            let read_idx_slot = self.uart_i32_index(UART_READ_IDX);
+            
+            // Single atomic read of indices at start
+            let write_idx = Atomics::load(&self.view, write_idx_slot).unwrap_or(0) as u32;
+            let read_idx = Atomics::load(&self.view, read_idx_slot).unwrap_or(0) as u32;
+            
+            let capacity = UART_BUFFER_CAPACITY as u32;
+            
+            // Calculate available space (ring buffer)
+            let available = if write_idx >= read_idx {
+                capacity - (write_idx - read_idx) - 1
+            } else {
+                read_idx - write_idx - 1
+            };
+            
+            // Write as many bytes as we can
+            let to_write = (bytes.len() as u32).min(available) as usize;
+            if to_write == 0 {
+                return 0;
+            }
+            
+            let mut current_write = write_idx;
+            for &byte in &bytes[..to_write] {
+                let byte_offset = UART_OUTPUT_REGION_OFFSET + UART_BUFFER_OFFSET + (current_write as usize);
+                self.byte_view.set_index(byte_offset as u32, byte);
+                current_write = (current_write + 1) % capacity;
+            }
+            
+            // Single atomic write to update the write index
+            let _ = Atomics::store(&self.view, write_idx_slot, current_write as i32);
+            
+            to_write
+        }
+        
+        /// Read multiple bytes from the shared UART output buffer.
+        /// This is more efficient than calling read_byte repeatedly.
+        /// Returns a vector of bytes read.
+        pub fn read_bytes(&self, max_count: usize) -> Vec<u8> {
+            let write_idx_slot = self.uart_i32_index(UART_WRITE_IDX);
+            let read_idx_slot = self.uart_i32_index(UART_READ_IDX);
+            
+            // Single atomic read of indices at start
+            let write_idx = Atomics::load(&self.view, write_idx_slot).unwrap_or(0) as u32;
+            let read_idx = Atomics::load(&self.view, read_idx_slot).unwrap_or(0) as u32;
+            
+            // Check if buffer is empty
+            if write_idx == read_idx {
+                return Vec::new();
+            }
+            
+            let capacity = UART_BUFFER_CAPACITY as u32;
+            
+            // Calculate available bytes
+            let available = if write_idx >= read_idx {
+                write_idx - read_idx
+            } else {
+                capacity - read_idx + write_idx
+            } as usize;
+            
+            let to_read = available.min(max_count);
+            let mut bytes = Vec::with_capacity(to_read);
+            
+            let mut current_read = read_idx;
+            for _ in 0..to_read {
+                let byte_offset = UART_OUTPUT_REGION_OFFSET + UART_BUFFER_OFFSET + (current_read as usize);
+                bytes.push(self.byte_view.get_index(byte_offset as u32));
+                current_read = (current_read + 1) % capacity;
+            }
+            
+            // Single atomic write to update the read index
+            let _ = Atomics::store(&self.view, read_idx_slot, current_read as i32);
+            
+            bytes
+        }
     }
 
     /// Shared UART input ring buffer for main thread to send input to workers.
@@ -609,6 +694,81 @@ pub mod wasm {
             let read_idx = Atomics::load(&self.view, read_idx_slot).unwrap_or(0);
 
             write_idx != read_idx
+        }
+        
+        /// Write multiple bytes to the shared UART input buffer.
+        /// This is more efficient than calling write_byte repeatedly.
+        /// Returns the number of bytes successfully written.
+        pub fn write_bytes(&self, bytes: &[u8]) -> usize {
+            if bytes.is_empty() {
+                return 0;
+            }
+            
+            let write_idx_slot = self.uart_i32_index(UART_INPUT_WRITE_IDX);
+            let read_idx_slot = self.uart_i32_index(UART_INPUT_READ_IDX);
+            
+            let write_idx = Atomics::load(&self.view, write_idx_slot).unwrap_or(0) as u32;
+            let read_idx = Atomics::load(&self.view, read_idx_slot).unwrap_or(0) as u32;
+            
+            let capacity = UART_INPUT_BUFFER_CAPACITY as u32;
+            
+            let available = if write_idx >= read_idx {
+                capacity - (write_idx - read_idx) - 1
+            } else {
+                read_idx - write_idx - 1
+            };
+            
+            let to_write = (bytes.len() as u32).min(available) as usize;
+            if to_write == 0 {
+                return 0;
+            }
+            
+            let mut current_write = write_idx;
+            for &byte in &bytes[..to_write] {
+                let byte_offset = UART_INPUT_REGION_OFFSET + UART_INPUT_BUFFER_OFFSET + (current_write as usize);
+                self.byte_view.set_index(byte_offset as u32, byte);
+                current_write = (current_write + 1) % capacity;
+            }
+            
+            let _ = Atomics::store(&self.view, write_idx_slot, current_write as i32);
+            
+            to_write
+        }
+        
+        /// Read multiple bytes from the shared UART input buffer.
+        /// This is more efficient than calling read_byte repeatedly.
+        pub fn read_bytes(&self, max_count: usize) -> Vec<u8> {
+            let write_idx_slot = self.uart_i32_index(UART_INPUT_WRITE_IDX);
+            let read_idx_slot = self.uart_i32_index(UART_INPUT_READ_IDX);
+            
+            let write_idx = Atomics::load(&self.view, write_idx_slot).unwrap_or(0) as u32;
+            let read_idx = Atomics::load(&self.view, read_idx_slot).unwrap_or(0) as u32;
+            
+            if write_idx == read_idx {
+                return Vec::new();
+            }
+            
+            let capacity = UART_INPUT_BUFFER_CAPACITY as u32;
+            
+            let available = if write_idx >= read_idx {
+                write_idx - read_idx
+            } else {
+                capacity - read_idx + write_idx
+            } as usize;
+            
+            let to_read = available.min(max_count);
+            let mut bytes = Vec::with_capacity(to_read);
+            
+            let mut current_read = read_idx;
+            for _ in 0..to_read {
+                let byte_offset = UART_INPUT_REGION_OFFSET + UART_INPUT_BUFFER_OFFSET + (current_read as usize);
+                bytes.push(self.byte_view.get_index(byte_offset as u32));
+                current_read = (current_read + 1) % capacity;
+            }
+            
+            let _ = Atomics::store(&self.view, read_idx_slot, current_read as i32);
+            
+            bytes
         }
     }
 

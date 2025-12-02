@@ -57,6 +57,9 @@ pub struct WorkerState {
     clint: SharedClint,
     hart_id: usize,
     step_count: u64,
+    /// Cached flag: have we received the "workers can start" signal?
+    /// Once set to true, we never need to check again (reduces atomic ops).
+    workers_started: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -91,6 +94,7 @@ impl WorkerState {
             clint,
             hart_id,
             step_count: 0,
+            workers_started: false, // Will be cached on first check
         }
     }
     
@@ -100,9 +104,19 @@ impl WorkerState {
     /// the event loop to yield between batches. This prevents the worker
     /// from blocking indefinitely and allows it to respond to messages.
     ///
+    /// Performance optimization: We reduce atomic operations by:
+    /// - Only checking halt signals every HALT_CHECK_INTERVAL instructions
+    /// - Only checking interrupts every INTERRUPT_CHECK_INTERVAL instructions
+    /// - Doing a full interrupt check at the end of each batch
+    ///
     /// Returns a WorkerStepResult indicating whether to continue, halt, etc.
     pub fn step_batch(&mut self, batch_size: u32) -> WorkerStepResult {
-        // Check for halt request first
+        // Check intervals - reduce atomic operations overhead
+        // Higher values = better performance, but less responsive to signals
+        const HALT_CHECK_INTERVAL: u32 = 10_000;
+        const INTERRUPT_CHECK_INTERVAL: u32 = 5_000;
+        
+        // Check for halt request first (one atomic check at batch start)
         if self.control.should_stop() {
             web_sys::console::log_1(&JsValue::from_str(
                 &format!("[Worker {}] Halt detected after {} steps", 
@@ -113,13 +127,35 @@ impl WorkerState {
         // Wait for main thread to signal that workers can start.
         // This ensures hart 0 boots first and sets up memory before
         // secondary harts start executing kernel code.
-        if !self.control.can_workers_start() {
-            // Still parked - return Continue to keep polling
-            return WorkerStepResult::Continue;
+        // 
+        // Optimization: Cache the result once workers are allowed to start.
+        // This eliminates an atomic operation per batch after startup.
+        if !self.workers_started {
+            if !self.control.can_workers_start() {
+                // Still parked - return Continue to keep polling
+                return WorkerStepResult::Continue;
+            }
+            // Workers can start - cache this permanently
+            self.workers_started = true;
         }
         
-        // Execute batch of instructions
-        for _ in 0..batch_size {
+        // Execute batch of instructions with reduced atomic operation frequency
+        for i in 0..batch_size {
+            // Periodic halt check (much less frequent than per-instruction)
+            if i > 0 && i % HALT_CHECK_INTERVAL == 0 {
+                if self.control.should_stop() {
+                    web_sys::console::log_1(&JsValue::from_str(
+                        &format!("[Worker {}] Halt detected during batch after {} steps", 
+                            self.hart_id, self.step_count)));
+                    return WorkerStepResult::Halted;
+                }
+            }
+            
+            // Periodic interrupt check (less frequent than halt check)
+            if i > 0 && i % INTERRUPT_CHECK_INTERVAL == 0 {
+                self.deliver_interrupts();
+            }
+            
             match self.cpu.step(&self.bus) {
                 Ok(()) => {
                     self.step_count += 1;
@@ -145,7 +181,16 @@ impl WorkerState {
             }
         }
         
-        // Check and deliver interrupts from shared CLINT
+        // Full interrupt check at end of batch
+        self.deliver_interrupts();
+        
+        WorkerStepResult::Continue
+    }
+    
+    /// Check and deliver interrupts from shared CLINT.
+    /// Separated into its own method to allow periodic calling during batch execution.
+    #[inline]
+    fn deliver_interrupts(&mut self) {
         let (msip_pending, timer_pending) = self.clint.check_interrupts(self.hart_id);
         if msip_pending || timer_pending {
             if let Ok(mut mip) = self.cpu.read_csr(0x344) { // MIP
@@ -158,8 +203,6 @@ impl WorkerState {
                 let _ = self.cpu.write_csr(0x344, mip);
             }
         }
-        
-        WorkerStepResult::Continue
     }
     
     /// Get the total step count.
