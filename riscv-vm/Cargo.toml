@@ -30,7 +30,7 @@ napi-derive = { version = "2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tun-tap = "0.1"
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 tungstenite = "0.21"
 # WebTransport for connecting to the relay
 wtransport = { version = "0.6", features = ["dangerous-configuration"] }
