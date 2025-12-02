@@ -1,3 +1,13 @@
+## 0.1.2 (2025-12-02)
+
+### 🩹 Fixes
+
+- major refactor for wasm multi threading Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([46a6c21](https://github.com/elribonazo/riscv-vm/commit/46a6c21))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.1.1 (2025-11-30)
 
 This was a version bump only for relay to align it with other projects, there were no code changes.
