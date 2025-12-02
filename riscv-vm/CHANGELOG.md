@@ -1,3 +1,13 @@
+## 0.0.35 (2025-12-02)
+
+### 🩹 Fixes
+
+- remove unused dependency Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([ce3f059](https://github.com/elribonazo/riscv-vm/commit/ce3f059))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.0.34 (2025-12-02)
 
 ### 🩹 Fixes
