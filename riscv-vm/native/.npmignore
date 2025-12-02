@@ -1,0 +1,4 @@
+# Empty .npmignore to override .gitignore
+# This ensures .node files are included in the npm package
+# (they are excluded from git but should be included in npm)
+
