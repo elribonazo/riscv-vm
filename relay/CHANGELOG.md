@@ -1,3 +1,7 @@
+## 0.1.3 (2025-12-02)
+
+This was a version bump only for relay to align it with other projects, there were no code changes.
+
 ## 0.1.2 (2025-12-02)
 
 ### 🩹 Fixes
