@@ -7,20 +7,31 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │ Control Region (4KB)         @ 0x0000                       │
+//! │ 0x00000 - 0x00FFF: Control Region (4KB)                     │
 //! │   - halt_requested (i32)     @ 0x0000                       │
 //! │   - halted (i32)             @ 0x0004                       │
 //! │   - halt_code (i64)          @ 0x0008                       │
 //! │   - reserved                 @ 0x0010+                      │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │ CLINT Region (64KB)          @ 0x1000                       │
+//! │ 0x01000 - 0x10FFF: CLINT Region (64KB)                      │
 //! │   - msip[MAX_HARTS]          @ 0x0000 (4B each)             │
 //! │   - hart_count               @ 0x0F00 (4B)                  │
 //! │   - mtimecmp[MAX_HARTS]      @ 0x4000 (8B each)             │
 //! │   - mtime                    @ 0xBFF8 (8B)                  │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │ DRAM Region                  @ 0x11000 (DRAM_BASE offset)   │
-//! │   - Kernel, stack, heap, etc.                               │
+//! │ 0x11000 - 0x11FFF: UART Output Ring Buffer (4KB)            │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │ 0x12000 - 0x12FFF: UART Input Ring Buffer (4KB)             │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │ 0x13000 - 0x13FFF: JIT CPU State Region (4KB)               │
+//! │   - Registers (256 bytes)                                   │
+//! │   - PC, Mode                                                │
+//! │   - Trap signaling                                          │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │ 0x14000 - ...: DRAM                                         │
+//! │   - Kernel image                                            │
+//! │   - Stack                                                   │
+//! │   - Heap                                                    │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -39,9 +50,33 @@ pub const UART_OUTPUT_REGION_SIZE: usize = 4096;
 /// Size of the shared UART input region in bytes (4KB).
 pub const UART_INPUT_REGION_SIZE: usize = 4096;
 
+/// Size of the JIT CPU state region in bytes (4KB).
+pub const JIT_STATE_REGION_SIZE: usize = 4096;
+
+// ============================================================================
+// Offsets
+// ============================================================================
+
+/// Offset of control region.
+pub const CONTROL_OFFSET: usize = 0x00000;
+
+/// Offset of CLINT region.
+pub const CLINT_OFFSET: usize = CONTROL_OFFSET + CONTROL_REGION_SIZE; // 0x01000
+
+/// Offset of UART output region.
+pub const UART_OUTPUT_OFFSET: usize = CLINT_OFFSET + CLINT_REGION_SIZE; // 0x11000
+
+/// Offset of UART input region.
+pub const UART_INPUT_OFFSET: usize = UART_OUTPUT_OFFSET + UART_OUTPUT_REGION_SIZE; // 0x12000
+
+/// Offset of JIT state region.
+pub const JIT_STATE_OFFSET: usize = UART_INPUT_OFFSET + UART_INPUT_REGION_SIZE; // 0x13000
+
+/// Offset where DRAM data starts.
+pub const DRAM_OFFSET: usize = JIT_STATE_OFFSET + JIT_STATE_REGION_SIZE; // 0x14000
+
 /// Total header size before DRAM starts.
-pub const HEADER_SIZE: usize =
-    CONTROL_REGION_SIZE + CLINT_REGION_SIZE + UART_OUTPUT_REGION_SIZE + UART_INPUT_REGION_SIZE;
+pub const HEADER_SIZE: usize = DRAM_OFFSET;
 
 // ============================================================================
 // Shared UART Output Region Offsets
@@ -849,11 +884,52 @@ mod tests {
         // UART input region is 4KB
         assert_eq!(UART_INPUT_REGION_SIZE, 4096);
 
-        // Header is control + CLINT + UART output + UART input
-        assert_eq!(HEADER_SIZE, 4096 + 0x10000 + 4096 + 4096);
+        // JIT state region is 4KB
+        assert_eq!(JIT_STATE_REGION_SIZE, 4096);
+
+        // Header is control + CLINT + UART output + UART input + JIT state
+        assert_eq!(HEADER_SIZE, 4096 + 0x10000 + 4096 + 4096 + 4096);
 
         // DRAM starts after header
         assert_eq!(dram_offset(), HEADER_SIZE);
+    }
+
+    #[test]
+    fn test_region_offsets() {
+        // Verify all region offsets are correctly calculated
+        assert_eq!(CONTROL_OFFSET, 0x00000);
+        assert_eq!(CLINT_OFFSET, 0x01000);
+        assert_eq!(UART_OUTPUT_OFFSET, 0x11000);
+        assert_eq!(UART_INPUT_OFFSET, 0x12000);
+        assert_eq!(JIT_STATE_OFFSET, 0x13000);
+        assert_eq!(DRAM_OFFSET, 0x14000);
+    }
+
+    #[test]
+    fn test_jit_state_offset_matches() {
+        // Ensure the JIT state offset matches what's defined in jit/state.rs
+        assert_eq!(JIT_STATE_OFFSET, crate::jit::state::JIT_STATE_OFFSET);
+    }
+
+    #[test]
+    fn test_region_alignment() {
+        // All regions should be 4KB aligned
+        assert_eq!(CONTROL_OFFSET % 4096, 0);
+        assert_eq!(CLINT_OFFSET % 4096, 0);
+        assert_eq!(UART_OUTPUT_OFFSET % 4096, 0);
+        assert_eq!(UART_INPUT_OFFSET % 4096, 0);
+        assert_eq!(JIT_STATE_OFFSET % 4096, 0);
+        assert_eq!(DRAM_OFFSET % 4096, 0);
+    }
+
+    #[test]
+    fn test_no_region_overlap() {
+        // Verify regions don't overlap
+        assert!(CONTROL_OFFSET + CONTROL_REGION_SIZE <= CLINT_OFFSET);
+        assert!(CLINT_OFFSET + CLINT_REGION_SIZE <= UART_OUTPUT_OFFSET);
+        assert!(UART_OUTPUT_OFFSET + UART_OUTPUT_REGION_SIZE <= UART_INPUT_OFFSET);
+        assert!(UART_INPUT_OFFSET + UART_INPUT_REGION_SIZE <= JIT_STATE_OFFSET);
+        assert!(JIT_STATE_OFFSET + JIT_STATE_REGION_SIZE <= DRAM_OFFSET);
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crate::Trap;
 use crate::bus::{DRAM_BASE, SystemBus};
 use crate::console::Console;
 use crate::cpu::Cpu;
+use crate::jit::JitConfig;
 use crate::loader::load_elf_into_dram;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -88,6 +89,8 @@ pub struct NativeVm {
     pub shared: Arc<SharedState>,
     num_harts: usize,
     entry_pc: u64,
+    /// JIT configuration (applied to all harts when started)
+    jit_config: Option<JitConfig>,
 }
 
 impl NativeVm {
@@ -127,6 +130,7 @@ impl NativeVm {
             shared,
             num_harts,
             entry_pc,
+            jit_config: None,
         })
     }
 
@@ -184,6 +188,24 @@ impl NativeVm {
         self.entry_pc
     }
 
+    /// Enable JIT compilation with the given configuration.
+    ///
+    /// Must be called before `run()` / `start_workers()`.
+    /// The configuration will be applied to all harts when they start.
+    pub fn enable_jit(&mut self, config: JitConfig) {
+        // Apply to primary CPU immediately if available
+        if let Some(cpu) = self.primary_cpu.as_mut() {
+            cpu.enable_jit(config.clone());
+        }
+        // Store for worker threads
+        self.jit_config = Some(config);
+    }
+
+    /// Check if JIT compilation is enabled.
+    pub fn jit_enabled(&self) -> bool {
+        self.jit_config.is_some()
+    }
+
     /// Get a reference to the shared bus.
     pub fn bus(&self) -> &Arc<SystemBus> {
         &self.bus
@@ -195,11 +217,12 @@ impl NativeVm {
             let bus = Arc::clone(&self.bus);
             let shared = Arc::clone(&self.shared);
             let entry_pc = self.entry_pc;
+            let jit_config = self.jit_config.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("hart-{}", hart_id))
                 .spawn(move || {
-                    hart_thread(hart_id, entry_pc, bus, shared);
+                    hart_thread(hart_id, entry_pc, bus, shared, jit_config);
                 })
                 .expect("Failed to spawn hart thread");
 
@@ -384,8 +407,19 @@ impl Drop for NativeVm {
     }
 }
 
-fn hart_thread(hart_id: usize, entry_pc: u64, bus: Arc<SystemBus>, shared: Arc<SharedState>) {
+fn hart_thread(
+    hart_id: usize,
+    entry_pc: u64,
+    bus: Arc<SystemBus>,
+    shared: Arc<SharedState>,
+    jit_config: Option<JitConfig>,
+) {
     let mut cpu = Cpu::new(entry_pc, hart_id as u64);
+
+    // Apply JIT configuration if enabled
+    if let Some(config) = jit_config {
+        cpu.enable_jit(config);
+    }
     let mut step_count: u64 = 0;
     let start_time = Instant::now();
 

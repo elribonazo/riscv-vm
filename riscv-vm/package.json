@@ -20,6 +20,10 @@
       "import": "./build/worker.mjs",
       "require": "./build/worker.js"
     },
+    "./jit-worker": {
+      "types": "./build/jit-worker.d.ts",
+      "import": "./build/jit-worker.js"
+    },
     "./native": {
       "import": "./native/index.mjs",
       "require": "./native/index.js"
@@ -46,6 +50,7 @@
   ],
   "scripts": {
     "build": "rm -rf build && sh build.sh",
+    "build:jit-worker": "tsup --config tsup/tsup.jit-worker.ts",
     "build:native": "napi build --platform --release --features napi --cargo-cwd . --cargo-flags=\"--lib\" native",
     "build:native:debug": "napi build --platform --features napi --cargo-cwd . --cargo-flags=\"--lib\" native",
     "build:all": "npm run build && npm run build:native"

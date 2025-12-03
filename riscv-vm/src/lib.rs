@@ -3,6 +3,7 @@ pub mod cpu;
 pub mod devices;
 pub mod dram;
 pub mod engine;
+pub mod jit;
 pub mod mmu;
 pub use devices::{clint, plic, uart};
 pub mod loader;
@@ -30,3 +31,16 @@ pub use vm::wasm::{NetworkStatus, WasmVm};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use vm::native::NativeVm;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// JIT Module Exports
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// JIT compilation support
+pub use jit::{JitCache, JitCompiler, JitConfig, JitExecResult};
+pub use jit::{CompileRequest, CompileResponse, CompileStatus, SerializedMicroOp};
+pub use jit::CompilationResult;
+
+/// JIT worker context for WASM builds
+#[cfg(target_arch = "wasm32")]
+pub use jit::JitWorkerContext;
