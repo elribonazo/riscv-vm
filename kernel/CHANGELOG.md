@@ -1,3 +1,13 @@
+## 0.1.9 (2025-12-03)
+
+### 🩹 Fixes
+
+- upgrades and split code Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([dbb869a](https://github.com/elribonazo/riscv-vm/commit/dbb869a))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.1.8 (2025-12-02)
 
 ### 🩹 Fixes
