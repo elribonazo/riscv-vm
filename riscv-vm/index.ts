@@ -42,6 +42,8 @@ export interface JitCompileRequest {
 }
 
 /**
+ * 
+ * 
  * Message received from JIT worker with compilation result.
  */
 export interface JitCompileResponse {

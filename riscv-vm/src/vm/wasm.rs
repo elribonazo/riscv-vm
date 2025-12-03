@@ -867,18 +867,27 @@ impl WasmVm {
     /// Enable or disable JIT compilation.
     #[wasm_bindgen(js_name = "setJitEnabled")]
     pub fn set_jit_enabled(&mut self, enabled: bool) {
+        // Update runtime config for diagnostics
         if let Some(ref mut jit) = self.jit_runtime {
             jit.config_mut().enabled = enabled;
+        }
+        // Actually enable JIT on the CPU
+        if enabled {
+            let config = self.jit_runtime
+                .as_ref()
+                .map(|jit| jit.config().clone())
+                .unwrap_or_default();
+            self.cpu.enable_jit(config);
+        } else {
+            self.cpu.use_jit = false;
         }
     }
 
     /// Check if JIT is currently enabled.
     #[wasm_bindgen(js_name = "isJitEnabled")]
     pub fn is_jit_enabled(&self) -> bool {
-        self.jit_runtime
-            .as_ref()
-            .map(|jit| jit.config().enabled && !jit.is_disabled_by_error())
-            .unwrap_or(false)
+        // Check the CPU's actual JIT state
+        self.cpu.use_jit
     }
 
     /// Re-enable JIT after it was disabled by errors.
@@ -981,19 +990,13 @@ impl WasmVm {
     /// Get number of cached JIT blocks.
     #[wasm_bindgen(js_name = "getJitCacheSize")]
     pub fn get_jit_cache_size(&self) -> usize {
-        self.jit_runtime
-            .as_ref()
-            .map(|jit| jit.cache().entry_count())
-            .unwrap_or(0)
+        self.cpu.jit_cache.entry_count()
     }
 
     /// Get JIT cache memory usage in bytes.
     #[wasm_bindgen(js_name = "getJitCacheMemoryUsage")]
     pub fn get_jit_cache_memory_usage(&self) -> usize {
-        self.jit_runtime
-            .as_ref()
-            .map(|jit| jit.cache().memory_usage())
-            .unwrap_or(0)
+        self.cpu.jit_cache.memory_usage()
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1003,18 +1006,18 @@ impl WasmVm {
     /// Set JIT compilation threshold (min exec_count before compiling).
     #[wasm_bindgen(js_name = "setJitThreshold")]
     pub fn set_jit_threshold(&mut self, threshold: u32) {
+        // Update runtime config
         if let Some(ref mut jit) = self.jit_runtime {
             jit.config_mut().tier1_threshold = threshold;
         }
+        // Update CPU config
+        self.cpu.set_jit_threshold(threshold);
     }
 
     /// Get current JIT compilation threshold.
     #[wasm_bindgen(js_name = "getJitThreshold")]
     pub fn get_jit_threshold(&self) -> u32 {
-        self.jit_runtime
-            .as_ref()
-            .map(|jit| jit.config().tier1_threshold)
-            .unwrap_or(0)
+        self.cpu.get_jit_threshold()
     }
 
     /// Set maximum block size for JIT compilation.
@@ -1070,20 +1073,21 @@ impl WasmVm {
     }
 
     /// Get JIT execution ratio (JIT executions / total executions).
+    /// Calculated from CPU's block cache statistics.
     #[wasm_bindgen(js_name = "getJitExecutionRatio")]
     pub fn get_jit_execution_ratio(&self) -> f64 {
-        self.jit_runtime
-            .as_ref()
-            .map(|jit| jit.trace().stats().jit_ratio())
-            .unwrap_or(0.0)
+        let stats = self.cpu.jit_cache.stats();
+        let total = stats.hits + stats.misses;
+        if total == 0 {
+            0.0
+        } else {
+            stats.hits as f64 / total as f64
+        }
     }
 
     /// Get JIT cache hit ratio.
     #[wasm_bindgen(js_name = "getJitCacheHitRatio")]
     pub fn get_jit_cache_hit_ratio(&self) -> f64 {
-        self.jit_runtime
-            .as_ref()
-            .map(|jit| jit.cache().stats().hit_ratio())
-            .unwrap_or(0.0)
+        self.cpu.jit_cache.stats().hit_ratio()
     }
 }

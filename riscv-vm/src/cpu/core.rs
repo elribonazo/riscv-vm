@@ -189,6 +189,16 @@ impl Cpu {
         self.use_jit = true;
     }
 
+    /// Set JIT compilation threshold.
+    pub fn set_jit_threshold(&mut self, threshold: u32) {
+        self.jit_config.tier1_threshold = threshold;
+    }
+
+    /// Get JIT compilation threshold.
+    pub fn get_jit_threshold(&self) -> u32 {
+        self.jit_config.tier1_threshold
+    }
+
     /// Invalidate JIT cache (called on SATP change, SFENCE.VMA).
     pub fn invalidate_jit(&mut self) {
         self.jit_cache.flush();
