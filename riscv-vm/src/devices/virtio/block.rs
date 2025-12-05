@@ -117,13 +117,13 @@ impl VirtioBlock {
                         data_len_done = data_len as u32;
                     }
                 } else if blk_type == 1 {
-                    // OUT (Write)
+                    // OUT (Write) - use bulk read from DRAM for performance
                     let offset = blk_sector * 512;
                     if offset + (data_len as u64) <= state.disk.len() as u64 {
-                        for i in 0..data_len {
-                            let b = dram.load_8(Self::phys_to_offset(data_addr + i as u64)?)? as u8;
-                            state.disk[offset as usize + i as usize] = b;
-                        }
+                        let dram_off = Self::phys_to_offset(data_addr)?;
+                        let src = dram.read_range(dram_off as usize, data_len as usize)?;
+                        state.disk[offset as usize..offset as usize + data_len as usize]
+                            .copy_from_slice(&src);
                         data_len_done = data_len as u32;
                     }
                 }

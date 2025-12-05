@@ -1368,9 +1368,9 @@ fn handle_tab_completion(buffer: &mut [u8], len: usize) -> usize {
 
         // Also check /usr/bin/ for scripts
         {
-            let fs_guard = FS_STATE.lock();
+            let mut fs_guard = FS_STATE.lock();
             let mut blk_guard = BLK_DEV.lock();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
+            if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                 let files = fs.list_dir(dev, "/");
                 for f in files {
                     if f.name.starts_with("/usr/bin/") {
@@ -1408,9 +1408,9 @@ fn handle_tab_completion(buffer: &mut [u8], len: usize) -> usize {
         };
 
         {
-            let fs_guard = FS_STATE.lock();
+            let mut fs_guard = FS_STATE.lock();
             let mut blk_guard = BLK_DEV.lock();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
+            if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                 let files = fs.list_dir(dev, "/");
                 let mut seen_dirs: Vec<String> = Vec::new();
 
@@ -1954,6 +1954,8 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
 
                 match fs.write_file(dev, &resolved_path, &final_data) {
                     Ok(()) => {
+                        // Sync to ensure data is written to disk
+                        let _ = fs.sync(dev);
                         uart::write_line("");
                         uart::write_str("\x1b[1;32m✓\x1b[0m Output written to ");
                         uart::write_line(&resolved_path);
@@ -1979,7 +1981,8 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
 ///
 /// Commands are resolved in this order:
 /// 1. Essential built-in commands (that require direct kernel access)
-/// 2. Scripts: searched in root, then /usr/bin/ directory (PATH-like)
+/// 2. Native commands (fast Rust implementations of common utilities)
+/// 3. Scripts: searched in root, then /usr/bin/ directory (PATH-like)
 fn execute_command(cmd: &[u8], args: &[u8]) {
     let cmd_str = core::str::from_utf8(cmd).unwrap_or("");
     let args_str = core::str::from_utf8(args).unwrap_or("");
@@ -2064,8 +2067,18 @@ fn execute_command(cmd: &[u8], args: &[u8]) {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // NATIVE COMMANDS (Fast implementations)
+    // These are common utilities implemented in Rust for maximum performance.
+    // Scripts in /usr/bin/ are still available for customization.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    if cmd::try_native(cmd_str, args_str) {
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // SCRIPT RESOLUTION (PATH-like)
-    // Search: 1) exact path  2) root directory  3) /usr/bin/ directory
+    // Fallback to script-based commands for flexibility/customization
     // ═══════════════════════════════════════════════════════════════════════════
 
     if let Some(script_bytes) = scripting::find_script(cmd_str) {
@@ -2153,9 +2166,9 @@ pub fn resolve_path(path: &str) -> alloc::string::String {
 
 /// Check if a path exists (has files under it or is a file)
 fn path_exists(path: &str) -> bool {
-    let fs_guard = FS_STATE.lock();
+    let mut fs_guard = FS_STATE.lock();
     let mut blk_guard = BLK_DEV.lock();
-    if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
+    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
         // Root always exists
         if path == "/" {
             return true;

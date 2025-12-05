@@ -17,6 +17,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use rhai::OptimizationLevel;
 use rhai::{
     packages::{Package, StandardPackage},
     Array, Dynamic, Engine, ImmutableString, Map, Scope, AST,
@@ -161,7 +162,7 @@ fn get_runtime() -> &'static ScriptRuntime {
 // AST CACHE - Cache compiled scripts for faster re-execution
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const AST_CACHE_MAX_SIZE: usize = 32;
+const AST_CACHE_MAX_SIZE: usize = 256;
 
 // Note: AST contains Rhai types that use Rc internally and are not Send.
 // This is acceptable because scripts only run on the primary hart (shell).
@@ -240,11 +241,11 @@ pub fn preload_scripts() -> usize {
 
     // Collect scripts with FS lock, then release before compiling
     let scripts_to_cache: Vec<(String, Vec<u8>)> = {
-        let fs_guard = crate::FS_STATE.lock();
+        let mut fs_guard = crate::FS_STATE.lock();
         let mut blk_guard = crate::BLK_DEV.lock();
 
         let mut scripts = Vec::new();
-        if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
+        if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
             // List all files in /usr/bin/
             let files = fs.list_dir(dev, "/usr/bin");
 
@@ -441,9 +442,9 @@ impl ScriptRuntime {
         // ls() -> Array of {name, size, is_dir}
         engine.register_fn("ls", || -> Array {
             let mut list = Array::new();
-            let fs_guard = crate::FS_STATE.lock();
+            let mut fs_guard = crate::FS_STATE.lock();
             let mut blk_guard = crate::BLK_DEV.lock();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
+            if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                 let files = fs.list_dir(dev, "/");
                 for f in files {
                     let mut map = Map::new();
@@ -535,9 +536,9 @@ impl ScriptRuntime {
 
         // is_dir(path) -> bool
         engine.register_fn("is_dir", |path: ImmutableString| -> bool {
-            let fs_guard = crate::FS_STATE.lock();
+            let mut fs_guard = crate::FS_STATE.lock();
             let mut blk_guard = crate::BLK_DEV.lock();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
+            if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                 return fs.is_dir(dev, path.as_str());
             }
             false
@@ -1225,9 +1226,9 @@ impl ScriptRuntime {
         // FsModule methods
         engine.register_fn("ls", |_: &mut FsModule| -> Array {
             let mut list = Array::new();
-            let fs_guard = crate::FS_STATE.lock();
+            let mut fs_guard = crate::FS_STATE.lock();
             let mut blk_guard = crate::BLK_DEV.lock();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
+            if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                 let files = fs.list_dir(dev, "/");
                 for f in files {
                     let mut map = Map::new();
@@ -1592,10 +1593,11 @@ impl ScriptRuntime {
         // Register StandardPackage
         let package = StandardPackage::new();
         engine.register_global_module(package.as_shared_module());
+        engine.set_optimization_level(OptimizationLevel::Full);
 
         // Engine limits
         engine.set_max_call_levels(64);
-        engine.set_max_operations(1_000_000);
+        engine.set_max_operations(10_000_000);
         engine.set_max_string_size(16384);
         engine.set_max_array_size(10000);
         engine.set_max_map_size(1000);

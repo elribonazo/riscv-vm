@@ -1,7 +1,6 @@
 use crate::Trap;
 use crate::bus::{DRAM_BASE, SystemBus};
 use crate::cpu;
-use crate::jit::{JitConfig, JitRuntime};
 use crate::loader::load_elf_wasm;
 use crate::shared_mem;
 use std::sync::Arc;
@@ -120,8 +119,6 @@ pub struct WasmVm {
     workers_signaled: bool,
     /// External network backend for Node.js native addon bridging
     external_net: Option<Arc<crate::net::external::ExternalNetworkBackend>>,
-    /// JIT runtime for debug control
-    jit_runtime: Option<JitRuntime>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -262,9 +259,6 @@ impl WasmVm {
             num_harts, entry_pc, sab_available
         )));
 
-        // Initialize JIT runtime with default config
-        let jit_runtime = Some(JitRuntime::new(JitConfig::default()));
-
         Ok(WasmVm {
             bus,
             cpu,
@@ -285,7 +279,6 @@ impl WasmVm {
             boot_steps: 0,
             workers_signaled: false,
             external_net: None,
-            jit_runtime,
         })
     }
 
@@ -511,10 +504,14 @@ impl WasmVm {
             }
         }
 
-        // Track boot progress and signal workers after initial boot
-        // This ensures hart 0 has time to set up memory, page tables, etc.
-        // before secondary harts start executing.
-        const BOOT_STEPS_THRESHOLD: u64 = 500_000; // ~500K instructions for boot
+        // Track boot progress and signal workers after initial boot.
+        // This gives hart 0 minimal time to set up critical state before
+        // secondary harts start executing. Secondary harts should immediately
+        // check mhartid and go to a parking loop, so they don't need much delay.
+        // NOTE: The kernel is responsible for synchronizing harts - this is just
+        // a small buffer to ensure workers aren't trying to execute before the
+        // first few instructions of hart 0 have run.
+        const BOOT_STEPS_THRESHOLD: u64 = 1_000; // ~1K instructions - minimal delay
         if !self.workers_signaled {
             self.boot_steps += 1;
             if self.boot_steps >= BOOT_STEPS_THRESHOLD {
@@ -858,236 +855,5 @@ impl WasmVm {
     /// Get current memory usage (DRAM size) in bytes.
     pub fn get_memory_usage(&self) -> u64 {
         self.bus.dram_size() as u64
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // JIT Enable/Disable
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Enable or disable JIT compilation.
-    #[wasm_bindgen(js_name = "setJitEnabled")]
-    pub fn set_jit_enabled(&mut self, enabled: bool) {
-        // Update runtime config for diagnostics
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.config_mut().enabled = enabled;
-        }
-        // Actually enable JIT on the CPU
-        if enabled {
-            let config = self.jit_runtime
-                .as_ref()
-                .map(|jit| jit.config().clone())
-                .unwrap_or_default();
-            self.cpu.enable_jit(config);
-        } else {
-            self.cpu.use_jit = false;
-        }
-    }
-
-    /// Check if JIT is currently enabled.
-    #[wasm_bindgen(js_name = "isJitEnabled")]
-    pub fn is_jit_enabled(&self) -> bool {
-        // Check the CPU's actual JIT state
-        self.cpu.use_jit
-    }
-
-    /// Re-enable JIT after it was disabled by errors.
-    #[wasm_bindgen(js_name = "reenableJit")]
-    pub fn reenable_jit(&mut self) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.reenable();
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Debug Output Control
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Enable or disable JIT debug WAT output.
-    #[wasm_bindgen(js_name = "setJitDebug")]
-    pub fn set_jit_debug(&mut self, debug: bool) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.config_mut().debug_wat = debug;
-        }
-    }
-
-    /// Enable or disable JIT execution tracing.
-    #[wasm_bindgen(js_name = "setJitTracing")]
-    pub fn set_jit_tracing(&mut self, enabled: bool) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            if enabled {
-                jit.trace_mut().enable();
-            } else {
-                jit.trace_mut().disable();
-            }
-        }
-    }
-
-    /// Check if JIT tracing is enabled.
-    #[wasm_bindgen(js_name = "isJitTracingEnabled")]
-    pub fn is_jit_tracing_enabled(&self) -> bool {
-        self.jit_runtime
-            .as_ref()
-            .map(|jit| jit.trace().is_enabled())
-            .unwrap_or(false)
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Diagnostics
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Get JIT diagnostics as JSON string.
-    #[wasm_bindgen(js_name = "getJitDiagnostics")]
-    pub fn get_jit_diagnostics(&self) -> String {
-        if let Some(ref jit) = self.jit_runtime {
-            let diag = jit.diagnostics();
-            serde_json::to_string_pretty(&diag).unwrap_or_else(|_| "{}".to_string())
-        } else {
-            r#"{"enabled": false, "reason": "JIT not initialized"}"#.to_string()
-        }
-    }
-
-    /// Get JIT statistics as JSON string.
-    #[wasm_bindgen(js_name = "getJitStats")]
-    pub fn get_jit_stats(&self) -> String {
-        if let Some(ref jit) = self.jit_runtime {
-            let stats = jit.trace().stats();
-            serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string())
-        } else {
-            "{}".to_string()
-        }
-    }
-
-    /// Dump recent JIT trace events to console.
-    #[wasm_bindgen(js_name = "dumpJitTrace")]
-    pub fn dump_jit_trace(&self, count: Option<usize>) {
-        if let Some(ref jit) = self.jit_runtime {
-            jit.trace().dump_recent(count.unwrap_or(50));
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Cache Management
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Clear JIT cache.
-    #[wasm_bindgen(js_name = "clearJitCache")]
-    pub fn clear_jit_cache(&mut self) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.cache_mut().clear();
-        }
-    }
-
-    /// Invalidate JIT cache for a specific address.
-    #[wasm_bindgen(js_name = "invalidateJitCacheAt")]
-    pub fn invalidate_jit_cache_at(&mut self, pc: u64) -> bool {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.cache_mut().invalidate(pc)
-        } else {
-            false
-        }
-    }
-
-    /// Get number of cached JIT blocks.
-    #[wasm_bindgen(js_name = "getJitCacheSize")]
-    pub fn get_jit_cache_size(&self) -> usize {
-        self.cpu.jit_cache.entry_count()
-    }
-
-    /// Get JIT cache memory usage in bytes.
-    #[wasm_bindgen(js_name = "getJitCacheMemoryUsage")]
-    pub fn get_jit_cache_memory_usage(&self) -> usize {
-        self.cpu.jit_cache.memory_usage()
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Configuration
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Set JIT compilation threshold (min exec_count before compiling).
-    #[wasm_bindgen(js_name = "setJitThreshold")]
-    pub fn set_jit_threshold(&mut self, threshold: u32) {
-        // Update runtime config
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.config_mut().tier1_threshold = threshold;
-        }
-        // Update CPU config
-        self.cpu.set_jit_threshold(threshold);
-    }
-
-    /// Get current JIT compilation threshold.
-    #[wasm_bindgen(js_name = "getJitThreshold")]
-    pub fn get_jit_threshold(&self) -> u32 {
-        self.cpu.get_jit_threshold()
-    }
-
-    /// Set maximum block size for JIT compilation.
-    #[wasm_bindgen(js_name = "setJitMaxBlockSize")]
-    pub fn set_jit_max_block_size(&mut self, size: usize) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.config_mut().max_block_size = size;
-        }
-    }
-
-    /// Add a PC to the JIT blacklist.
-    #[wasm_bindgen(js_name = "blacklistJitBlock")]
-    pub fn blacklist_jit_block(&mut self, pc: u64) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.config_mut().blacklist.push(pc);
-        }
-    }
-
-    /// Clear the JIT blacklist.
-    #[wasm_bindgen(js_name = "clearJitBlacklist")]
-    pub fn clear_jit_blacklist(&mut self) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.config_mut().blacklist.clear();
-        }
-    }
-
-    /// Reset all JIT error tracking.
-    #[wasm_bindgen(js_name = "resetJitErrors")]
-    pub fn reset_jit_errors(&mut self) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.reset_errors();
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Performance
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Enable TLB fast-path optimization.
-    #[wasm_bindgen(js_name = "setJitTlbFastPath")]
-    pub fn set_jit_tlb_fast_path(&mut self, enabled: bool) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.config_mut().enable_tlb_fast_path = enabled;
-        }
-    }
-
-    /// Set interrupt check interval (0 = disabled).
-    #[wasm_bindgen(js_name = "setJitInterruptCheckInterval")]
-    pub fn set_jit_interrupt_check_interval(&mut self, interval: usize) {
-        if let Some(ref mut jit) = self.jit_runtime {
-            jit.config_mut().interrupt_check_interval = interval;
-        }
-    }
-
-    /// Get JIT execution ratio (JIT executions / total executions).
-    /// Calculated from CPU's block cache statistics.
-    #[wasm_bindgen(js_name = "getJitExecutionRatio")]
-    pub fn get_jit_execution_ratio(&self) -> f64 {
-        let stats = self.cpu.jit_cache.stats();
-        let total = stats.hits + stats.misses;
-        if total == 0 {
-            0.0
-        } else {
-            stats.hits as f64 / total as f64
-        }
-    }
-
-    /// Get JIT cache hit ratio.
-    #[wasm_bindgen(js_name = "getJitCacheHitRatio")]
-    pub fn get_jit_cache_hit_ratio(&self) -> f64 {
-        self.cpu.jit_cache.stats().hit_ratio()
     }
 }

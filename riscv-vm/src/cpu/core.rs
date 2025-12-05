@@ -3,7 +3,6 @@ use crate::engine::block::Block;
 use crate::engine::cache::BlockCache;
 use crate::engine::decoder::{self, Op, Register};
 use crate::engine::microop::MicroOp;
-use crate::jit::{JitCache, JitCompiler, JitConfig};
 use crate::mmu::{self, AccessType as MmuAccessType, Tlb};
 use std::collections::HashMap;
 
@@ -13,29 +12,6 @@ use super::csr::{
     CsrFile,
 };
 use super::types::{Mode, Trap};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Execution Statistics
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Combined execution statistics for profiling and debugging.
-#[derive(Debug, Default, Clone)]
-pub struct ExecutionStats {
-    /// Times a block was found in the block cache.
-    pub block_cache_hits: u64,
-    /// Times a block needed to be compiled (cache miss).
-    pub block_cache_misses: u64,
-    /// Current number of cached blocks.
-    pub block_cache_size: usize,
-    /// Number of blocks JIT compiled.
-    pub jit_blocks_compiled: u64,
-    /// Total instructions executed via JIT.
-    pub jit_instructions: u64,
-    /// Times JIT code was executed (cache hit).
-    pub jit_cache_hits: u64,
-    /// Times JIT code was not available (cache miss).
-    pub jit_cache_misses: u64,
-}
 
 /// Cached decode result.
 /// Stores (pc, raw_instruction, decoded_op) for cache hit checking.
@@ -83,19 +59,6 @@ pub struct Cpu {
     pub block_cache: BlockCache,
     /// Enable/disable superblock optimization.
     pub use_blocks: bool,
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // JIT Compilation State
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// JIT function cache (PC -> compiled WASM)
-    pub jit_cache: JitCache,
-    /// JIT compiler instance
-    pub(super) jit_compiler: JitCompiler,
-    /// Enable/disable JIT compilation
-    pub use_jit: bool,
-    /// JIT configuration
-    pub(super) jit_config: JitConfig,
 }
 
 impl Cpu {
@@ -125,11 +88,6 @@ impl Cpu {
             decode_cache: [None; DECODE_CACHE_SIZE],
             block_cache: BlockCache::new(),
             use_blocks: false, // Disabled by default; enable for production workloads
-            // JIT fields
-            jit_cache: JitCache::default(),
-            jit_compiler: JitCompiler::default(),
-            use_jit: false, // Disabled by default
-            jit_config: JitConfig::default(),
         }
     }
 
@@ -176,51 +134,6 @@ impl Cpu {
     pub fn invalidate_blocks(&mut self) {
         self.block_cache.flush();
         self.invalidate_decode_cache();
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // JIT Control Methods
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Enable JIT compilation with custom config.
-    pub fn enable_jit(&mut self, config: JitConfig) {
-        self.jit_config = config.clone();
-        self.jit_compiler = JitCompiler::new(config);
-        self.use_jit = true;
-    }
-
-    /// Set JIT compilation threshold.
-    pub fn set_jit_threshold(&mut self, threshold: u32) {
-        self.jit_config.tier1_threshold = threshold;
-    }
-
-    /// Get JIT compilation threshold.
-    pub fn get_jit_threshold(&self) -> u32 {
-        self.jit_config.tier1_threshold
-    }
-
-    /// Invalidate JIT cache (called on SATP change, SFENCE.VMA).
-    pub fn invalidate_jit(&mut self) {
-        self.jit_cache.flush();
-    }
-
-    /// Get combined execution statistics.
-    ///
-    /// Returns statistics from both the block cache and JIT cache.
-    /// JIT statistics will be zero when JIT is disabled.
-    pub fn get_stats(&self) -> ExecutionStats {
-        let (block_hits, block_misses, block_size, _hit_rate) = self.block_cache.stats();
-        let jit_stats = self.jit_cache.stats();
-
-        ExecutionStats {
-            block_cache_hits: block_hits,
-            block_cache_misses: block_misses,
-            block_cache_size: block_size,
-            jit_blocks_compiled: jit_stats.blocks_compiled,
-            jit_instructions: jit_stats.jit_instructions,
-            jit_cache_hits: jit_stats.cache_hits,
-            jit_cache_misses: jit_stats.cache_misses,
-        }
     }
 
     pub fn read_reg(&self, reg: Register) -> u64 {

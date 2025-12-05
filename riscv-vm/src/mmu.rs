@@ -250,23 +250,6 @@ impl Tlb {
             };
         }
     }
-
-    /// Get TLB entry by direct index (for sync to shared memory).
-    ///
-    /// Returns a copy of the entry at the given index.
-    /// Index is masked to TLB_SIZE-1 for safety.
-    #[inline]
-    pub fn get_entry(&self, index: usize) -> TlbEntry {
-        let idx = index & TLB_MASK;
-        // SAFETY: idx is always < TLB_SIZE due to the bitmask
-        unsafe { *self.entries.get_unchecked(idx) }
-    }
-
-    /// Get all TLB entries (for bulk sync to shared memory).
-    #[inline]
-    pub fn entries(&self) -> &[TlbEntry; TLB_SIZE] {
-        &self.entries
-    }
 }
 
 /// Sv39/Sv48 translation + A/D bit updates.

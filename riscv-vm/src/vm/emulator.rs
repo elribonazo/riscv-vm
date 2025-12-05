@@ -416,7 +416,6 @@ impl Emulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::Bus;
     use crate::engine::decoder::Register;
 
     #[test]

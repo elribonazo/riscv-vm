@@ -340,10 +340,10 @@ fn mark_service_stopped(name: &str) {
 
 /// Run init scripts from /etc/init.d/
 fn run_init_scripts() {
-    let fs_guard = crate::FS_STATE.lock();
+    let mut fs_guard = crate::FS_STATE.lock();
     let mut blk_guard = crate::BLK_DEV.lock();
 
-    if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
+    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
         // Look for init scripts
         let files = fs.list_dir(dev, "/");
         for file in files {
@@ -399,6 +399,8 @@ fn write_boot_log() {
         if let Err(e) = fs.write_file(dev, "/var/log/kernel.log", boot_msg.as_bytes()) {
             klog_error("init", &format!("Failed to write boot log: {}", e));
         } else {
+            // Sync to ensure data is written to disk
+            let _ = fs.sync(dev);
             klog_info("init", "Boot log written to /var/log/kernel.log");
         }
     }
@@ -444,9 +446,14 @@ fn append_to_log(line: &str) -> bool {
 
         let new_content = format!("{}{}\n", trimmed, line);
 
-        return fs
+        if fs
             .write_file(dev, "/var/log/kernel.log", new_content.as_bytes())
-            .is_ok();
+            .is_ok()
+        {
+            // Sync to ensure data is written to disk
+            let _ = fs.sync(dev);
+            return true;
+        }
     }
     false
 }

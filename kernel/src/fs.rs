@@ -310,46 +310,19 @@ impl FileSystem {
 
     /// List all files in the root directory
     /// Returns a Vec of FileInfo structs for use by the scripting engine
-    pub fn list_dir(&self, dev: &mut VirtioBlock, _path: &str) -> Vec<FileInfo> {
+    pub fn list_dir(&mut self, dev: &mut VirtioBlock, _path: &str) -> Vec<FileInfo> {
         let mut entries = Vec::new();
-        let mut buf = [0u8; 512];
+        let mut consecutive_empty = 0;
 
         for i in 0..SEC_DIR_COUNT {
-            if dev.read_sector(SEC_DIR_START + i, &mut buf).is_ok() {
-                for j in 0..16 {
-                    // 512 / 32 = 16 entries
-                    let offset = j * 32;
-                    if buf[offset] == 0 {
-                        continue;
-                    }
+            let sector = SEC_DIR_START + i;
+            // Use cache for faster repeated access
+            let buf = match self.cache.read_mut(dev, sector) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
 
-                    let entry = unsafe { &*(buf[offset..offset + 32].as_ptr() as *const DirEntry) };
-
-                    // Decode Name
-                    let name_len = entry.name.iter().position(|&c| c == 0).unwrap_or(24);
-                    let name = core::str::from_utf8(&entry.name[..name_len])
-                        .unwrap_or("???")
-                        .into();
-
-                    entries.push(FileInfo {
-                        name,
-                        size: entry.size,
-                        is_dir: false, // Simple FS - everything is a file
-                    });
-                }
-            }
-        }
-        entries
-    }
-
-    /// Legacy ls function that prints directly to UART
-    pub fn ls(&self, dev: &mut VirtioBlock) {
-        let mut buf = [0u8; 512];
-        crate::uart::write_line("SIZE        NAME");
-        crate::uart::write_line("----------  --------------------");
-
-        for i in 0..SEC_DIR_COUNT {
-            dev.read_sector(SEC_DIR_START + i, &mut buf).ok();
+            let mut sector_empty = true;
             for j in 0..16 {
                 // 512 / 32 = 16 entries
                 let offset = j * 32;
@@ -357,6 +330,58 @@ impl FileSystem {
                     continue;
                 }
 
+                sector_empty = false;
+                let entry = unsafe { &*(buf[offset..offset + 32].as_ptr() as *const DirEntry) };
+
+                // Decode Name
+                let name_len = entry.name.iter().position(|&c| c == 0).unwrap_or(24);
+                let name = core::str::from_utf8(&entry.name[..name_len])
+                    .unwrap_or("???")
+                    .into();
+
+                entries.push(FileInfo {
+                    name,
+                    size: entry.size,
+                    is_dir: false, // Simple FS - everything is a file
+                });
+            }
+
+            // Early exit: if we see 2 consecutive empty sectors, stop scanning
+            // (files are allocated sequentially, so gaps are unlikely)
+            if sector_empty {
+                consecutive_empty += 1;
+                if consecutive_empty >= 2 {
+                    break;
+                }
+            } else {
+                consecutive_empty = 0;
+            }
+        }
+        entries
+    }
+
+    /// Legacy ls function that prints directly to UART
+    pub fn ls(&mut self, dev: &mut VirtioBlock) {
+        crate::uart::write_line("SIZE        NAME");
+        crate::uart::write_line("----------  --------------------");
+
+        let mut consecutive_empty = 0;
+        for i in 0..SEC_DIR_COUNT {
+            let sector = SEC_DIR_START + i;
+            let buf = match self.cache.read_mut(dev, sector) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+
+            let mut sector_empty = true;
+            for j in 0..16 {
+                // 512 / 32 = 16 entries
+                let offset = j * 32;
+                if buf[offset] == 0 {
+                    continue;
+                }
+
+                sector_empty = false;
                 let entry = unsafe { &*(buf[offset..offset + 32].as_ptr() as *const DirEntry) };
 
                 // Decode Name
@@ -373,6 +398,15 @@ impl FileSystem {
                     crate::uart::write_str("       ");
                 }
                 crate::uart::write_line(name);
+            }
+
+            if sector_empty {
+                consecutive_empty += 1;
+                if consecutive_empty >= 2 {
+                    break;
+                }
+            } else {
+                consecutive_empty = 0;
             }
         }
     }
@@ -466,8 +500,8 @@ impl FileSystem {
         }
         self.cache.mark_dirty(sector);
 
-        // Sync to ensure data is written (can be made optional for better perf)
-        self.cache.sync(dev)?;
+        // Note: sync() is NOT called here - writes are cached until explicit sync()
+        // Call fs.sync() when you need durability (e.g., after closing a file)
 
         Ok(())
     }
@@ -541,9 +575,7 @@ impl FileSystem {
                     if (self.bitmap_cache[i] & (1 << bit)) == 0 {
                         self.bitmap_cache[i] |= 1 << bit;
                         self.bitmap_dirty = true;
-
-                        // Sync immediately
-                        dev.write_sector(SEC_MAP_START, &self.bitmap_cache).ok()?;
+                        // Bitmap will be synced on next fs.sync() call
 
                         let sector = (i * 8 + bit) as u32;
                         // Map offset + offset in map
@@ -623,7 +655,7 @@ impl FileSystem {
     }
 
     /// Check if a path is a directory
-    pub fn is_dir(&self, dev: &mut VirtioBlock, path: &str) -> bool {
+    pub fn is_dir(&mut self, dev: &mut VirtioBlock, path: &str) -> bool {
         // Check if path ends with / or has children
         if path.ends_with('/') {
             return self.find_entry_pos(dev, path).is_some();

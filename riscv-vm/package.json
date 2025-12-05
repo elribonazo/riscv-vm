@@ -1,6 +1,6 @@
 {
   "name": "virtual-machine",
-  "version": "0.1.3",
+  "version": "0.1.0",
   "description": "RISC-V Virtual Machine with WASM and Node.js native support",
   "bin": "build/cli.js",
   "publishConfig": {
@@ -19,10 +19,6 @@
       "types": "./build/worker.d.ts",
       "import": "./build/worker.mjs",
       "require": "./build/worker.js"
-    },
-    "./jit-worker": {
-      "types": "./build/jit-worker.d.ts",
-      "import": "./build/jit-worker.js"
     },
     "./native": {
       "import": "./native/index.mjs",
@@ -50,7 +46,6 @@
   ],
   "scripts": {
     "build": "rm -rf build && sh build.sh",
-    "build:jit-worker": "tsup --config tsup/tsup.jit-worker.ts",
     "build:native": "napi build --platform --release --features napi --cargo-cwd . --cargo-flags=\"--lib\" native",
     "build:native:debug": "napi build --platform --features napi --cargo-cwd . --cargo-flags=\"--lib\" native",
     "build:all": "npm run build && npm run build:native"

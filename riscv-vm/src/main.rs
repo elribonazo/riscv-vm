@@ -3,7 +3,6 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use riscv_vm::jit::JitConfig;
 use riscv_vm::vm::native::NativeVm;
 
 #[derive(Parser, Debug)]
@@ -34,18 +33,6 @@ struct Args {
     /// Enable debug output
     #[arg(long)]
     debug: bool,
-
-    /// Enable JIT compilation
-    #[arg(long, default_value = "false")]
-    jit: bool,
-
-    /// JIT threshold (executions before compiling a block)
-    #[arg(long, default_value = "50")]
-    jit_threshold: u32,
-
-    /// Enable JIT debug output (WAT dumps, compilation logs)
-    #[arg(long, default_value = "false")]
-    jit_debug: bool,
 }
 
 /// Write to stdout with \r\n line endings (for raw terminal mode)
@@ -117,17 +104,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create VM
     let mut vm = NativeVm::new(&kernel_data, num_harts)?;
-
-    // Enable JIT if requested
-    if args.jit {
-        let config = JitConfig {
-            tier1_threshold: args.jit_threshold,
-            debug_wat: args.jit_debug,
-            ..Default::default()
-        };
-        vm.enable_jit(config);
-        uart_println!("[VM] JIT enabled (threshold: {})", args.jit_threshold);
-    }
 
     // Load disk if specified
     if let Some(disk_path) = &args.disk {
