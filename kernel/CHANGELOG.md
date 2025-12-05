@@ -1,3 +1,13 @@
+## 0.1.11 (2025-12-05)
+
+### 🩹 Fixes
+
+- improve terminal Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([5dacab6](https://github.com/elribonazo/riscv-vm/commit/5dacab6))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.1.10 (2025-12-05)
 
 ### 🩹 Fixes
