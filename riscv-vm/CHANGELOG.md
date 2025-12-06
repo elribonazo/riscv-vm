@@ -1,3 +1,13 @@
+## 0.1.6 (2025-12-06)
+
+### 🩹 Fixes
+
+- update riscv virtual machine Signed-off-by: Javier Ribó <elribonazo@gmail.com> ([ff53746](https://github.com/elribonazo/riscv-vm/commit/ff53746))
+
+### ❤️ Thank You
+
+- Javier Ribó
+
 ## 0.1.5 (2025-12-06)
 
 ### 🩹 Fixes
