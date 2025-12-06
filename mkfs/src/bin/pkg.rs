@@ -23,7 +23,6 @@ mod wasm {
         fn fs_write(path_ptr: *const u8, path_len: i32, data_ptr: *const u8, data_len: i32) -> i32;
         fn http_get(url_ptr: *const u8, url_len: i32, resp_ptr: *mut u8, resp_len: i32) -> i32;
         fn net_available() -> i32;
-        fn cwd_get(buf_ptr: *mut u8, buf_len: i32) -> i32;
     }
 
     fn log(s: &str) {

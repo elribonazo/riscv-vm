@@ -18,7 +18,6 @@ mod wasm {
         fn arg_count() -> i32;
         fn arg_get(index: i32, buf_ptr: *mut u8, buf_len: i32) -> i32;
         fn net_available() -> i32;
-        fn time() -> i64;
     }
 
     fn log(s: &str) {
@@ -37,26 +36,62 @@ mod wasm {
             }
             b"ls" => {
                 log("\x1b[1mls\x1b[0m - List directory contents\n\n");
-                log("Usage: ls [directory]\n\n");
+                log("Usage: ls [-l] [directory]\n\n");
+                log("Options:\n");
+                log("  -l  Long format with sizes\n\n");
                 log("Examples:\n");
                 log("  ls              List current directory\n");
-                log("  ls /usr/bin     List /usr/bin\n");
+                log("  ls -l /usr/bin  List /usr/bin in long format\n");
             }
             b"cat" => {
                 log("\x1b[1mcat\x1b[0m - Display file contents\n\n");
-                log("Usage: cat <file>\n\n");
+                log("Usage: cat [-n] <file>\n\n");
+                log("Options:\n");
+                log("  -n  Show line numbers\n\n");
                 log("Examples:\n");
                 log("  cat /etc/init.d/startup\n");
-                log("  cat README.md\n");
+                log("  cat -n README.md\n");
             }
             b"echo" => {
-                log("\x1b[1mecho\x1b[0m - Print text or write to file\n\n");
-                log("Usage:\n");
-                log("  echo <text>           Print text\n");
-                log("  echo <text> > <file>  Write to file\n\n");
+                log("\x1b[1mecho\x1b[0m - Print text to stdout\n\n");
+                log("Usage: echo [-n] <text>\n\n");
+                log("Options:\n");
+                log("  -n  No trailing newline\n\n");
                 log("Examples:\n");
                 log("  echo Hello World\n");
-                log("  echo 'data' > /tmp/test.txt\n");
+                log("  echo -n 'no newline'\n");
+            }
+            b"grep" => {
+                log("\x1b[1mgrep\x1b[0m - Search for patterns in files\n\n");
+                log("Usage: grep [OPTIONS] <pattern> <file...>\n\n");
+                log("Options:\n");
+                log("  -i  Case-insensitive search\n");
+                log("  -n  Show line numbers\n");
+                log("  -v  Invert match (show non-matching lines)\n\n");
+                log("Examples:\n");
+                log("  grep error /var/log/kernel.log\n");
+                log("  grep -i -n TODO *.rs\n");
+            }
+            b"tail" => {
+                log("\x1b[1mtail\x1b[0m - Show last lines of a file\n\n");
+                log("Usage: tail [-n NUM] <file...>\n\n");
+                log("Options:\n");
+                log("  -n NUM  Show last NUM lines (default: 10)\n\n");
+                log("Examples:\n");
+                log("  tail /var/log/kernel.log\n");
+                log("  tail -n 20 /var/log/kernel.log\n");
+            }
+            b"uptime" => {
+                log("\x1b[1muptime\x1b[0m - Show system uptime\n\n");
+                log("Usage: uptime\n\n");
+                log("Shows how long the system has been running.\n");
+            }
+            b"write" => {
+                log("\x1b[1mwrite\x1b[0m - Write content to a file\n\n");
+                log("Usage: write <filename> <content...>\n\n");
+                log("Examples:\n");
+                log("  write test.txt Hello World!\n");
+                log("  write /tmp/data.txt some data here\n");
             }
             b"wget" => {
                 log("\x1b[1mwget\x1b[0m - Download files from the web\n\n");
@@ -122,25 +157,30 @@ mod wasm {
         log("\x1b[1;36m╚══════════════════════════════════════════════════════════╝\x1b[0m\n\n");
         
         // Built-in Shell Commands
-        log("\x1b[1;33m┌─ Built-in Commands ─────────────────────────────────────┐\x1b[0m\n");
+        log("\x1b[1;33m┌─ Built-in Shell Commands ────────────────────────────────┐\x1b[0m\n");
         log("\x1b[33m│\x1b[0m  \x1b[1mcd\x1b[0m <dir>      Change directory                        \x1b[33m│\x1b[0m\n");
         log("\x1b[33m│\x1b[0m  \x1b[1mpwd\x1b[0m           Print working directory                  \x1b[33m│\x1b[0m\n");
-        log("\x1b[33m│\x1b[0m  \x1b[1mls\x1b[0m [dir]      List directory contents                  \x1b[33m│\x1b[0m\n");
-        log("\x1b[33m│\x1b[0m  \x1b[1mcat\x1b[0m <file>    Display file contents                    \x1b[33m│\x1b[0m\n");
-        log("\x1b[33m│\x1b[0m  \x1b[1mecho\x1b[0m <text>   Print text (or > file to write)         \x1b[33m│\x1b[0m\n");
         log("\x1b[33m│\x1b[0m  \x1b[1mclear\x1b[0m         Clear the screen                         \x1b[33m│\x1b[0m\n");
         log("\x1b[33m│\x1b[0m  \x1b[1mshutdown\x1b[0m      Power off the system                     \x1b[33m│\x1b[0m\n");
+        log("\x1b[33m│\x1b[0m  \x1b[1mping\x1b[0m <host>   Ping a host (Ctrl+C to stop)            \x1b[33m│\x1b[0m\n");
+        log("\x1b[33m│\x1b[0m  \x1b[1mnslookup\x1b[0m      DNS lookup                               \x1b[33m│\x1b[0m\n");
         log("\x1b[33m└──────────────────────────────────────────────────────────┘\x1b[0m\n\n");
         
         // WASM Programs
-        log("\x1b[1;32m┌─ Installed Programs ────────────────────────────────────┐\x1b[0m\n");
+        log("\x1b[1;32m┌─ WASM Programs (in /usr/bin/) ──────────────────────────┐\x1b[0m\n");
+        log("\x1b[32m│\x1b[0m  \x1b[1mls\x1b[0m [-l] [dir] List directory contents                 \x1b[32m│\x1b[0m\n");
+        log("\x1b[32m│\x1b[0m  \x1b[1mcat\x1b[0m [-n] file Display file contents                   \x1b[32m│\x1b[0m\n");
+        log("\x1b[32m│\x1b[0m  \x1b[1mecho\x1b[0m [-n] txt Print text to stdout                    \x1b[32m│\x1b[0m\n");
+        log("\x1b[32m│\x1b[0m  \x1b[1mgrep\x1b[0m pat file Search for patterns in files            \x1b[32m│\x1b[0m\n");
+        log("\x1b[32m│\x1b[0m  \x1b[1mtail\x1b[0m [-n] f   Show last lines of a file              \x1b[32m│\x1b[0m\n");
+        log("\x1b[32m│\x1b[0m  \x1b[1muptime\x1b[0m        Show system uptime                      \x1b[32m│\x1b[0m\n");
+        log("\x1b[32m│\x1b[0m  \x1b[1mwrite\x1b[0m f txt   Write content to a file                \x1b[32m│\x1b[0m\n");
         log("\x1b[32m│\x1b[0m  \x1b[1mhelp\x1b[0m [cmd]    Show help (this screen)                 \x1b[32m│\x1b[0m\n");
         log("\x1b[32m│\x1b[0m  \x1b[1mdmesg\x1b[0m [-n N]  Display kernel log messages              \x1b[32m│\x1b[0m\n");
         log("\x1b[32m│\x1b[0m  \x1b[1mnano\x1b[0m <file>   View file with line numbers             \x1b[32m│\x1b[0m\n");
         log("\x1b[32m│\x1b[0m  \x1b[1mwget\x1b[0m <url>    Download files from the web             \x1b[32m│\x1b[0m\n");
         log("\x1b[32m│\x1b[0m  \x1b[1mpkg\x1b[0m <cmd>     Package manager                         \x1b[32m│\x1b[0m\n");
         log("\x1b[32m│\x1b[0m  \x1b[1mcowsay\x1b[0m [msg]  ASCII art cow says something            \x1b[32m│\x1b[0m\n");
-        log("\x1b[32m│\x1b[0m  \x1b[1mhello\x1b[0m         Test WASM execution                      \x1b[32m│\x1b[0m\n");
         log("\x1b[32m└──────────────────────────────────────────────────────────┘\x1b[0m\n\n");
         
         // System Status

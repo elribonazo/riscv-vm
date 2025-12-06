@@ -14,26 +14,12 @@ use crate::{out_line, out_str};
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Try to execute a native command. Returns true if handled, false if not found.
+/// Note: Many commands (ls, cat, echo, grep, tail, uptime, write) have been moved
+/// to WASM binaries in /usr/bin/ for better modularity.
 pub fn try_native(cmd: &str, args: &str) -> bool {
     match cmd {
-        "ls" => {
-            native_ls(args);
-            true
-        }
-        "cat" => {
-            native_cat(args);
-            true
-        }
-        "echo" => {
-            native_echo(args);
-            true
-        }
         "ps" => {
             native_ps();
-            true
-        }
-        "uptime" => {
-            native_uptime();
             true
         }
         "memstats" => {
@@ -46,10 +32,6 @@ pub fn try_native(cmd: &str, args: &str) -> bool {
         }
         "sysinfo" => {
             native_sysinfo();
-            true
-        }
-        "grep" => {
-            native_grep(args);
             true
         }
         "ip" => {
@@ -72,272 +54,15 @@ pub fn try_native(cmd: &str, args: &str) -> bool {
             native_service(args);
             true
         }
-        "tail" => {
-            native_tail(args);
-            true
-        }
         "top" => {
             native_top(args);
-            true
-        }
-        "write" => {
-            native_write(args);
             true
         }
         _ => false,
     }
 }
 
-/// Entry for ls output (either a file or inferred directory)
-struct LsEntry {
-    name: String,
-    size: u32,
-    is_dir: bool,
-}
-
-/// ls - List directory contents (native implementation)
-fn native_ls(args: &str) {
-    let mut show_long = false;
-    let mut target_path = cwd_get();
-
-    // Parse arguments
-    for arg in args.split_whitespace() {
-        if arg.starts_with('-') {
-            for ch in arg.chars().skip(1) {
-                if ch == 'l' {
-                    show_long = true;
-                }
-            }
-        } else {
-            // Path argument
-            if arg.starts_with('/') {
-                target_path = String::from(arg);
-            } else {
-                let cwd = cwd_get();
-                if cwd == "/" {
-                    target_path = format!("/{}", arg);
-                } else {
-                    target_path = format!("{}/{}", cwd, arg);
-                }
-            }
-        }
-    }
-
-    // Normalize: ensure no trailing slash (except for root)
-    if target_path.len() > 1 && target_path.ends_with('/') {
-        target_path.pop();
-    }
-
-    let mut fs_guard = FS_STATE.lock();
-    let mut blk_guard = BLK_DEV.lock();
-
-    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-        // Get ALL files (list_dir ignores path param)
-        let all_files = fs.list_dir(dev, "/");
-
-        // Build prefix for filtering
-        let prefix = if target_path == "/" {
-            String::from("/")
-        } else {
-            format!("{}/", target_path)
-        };
-
-        // Collect entries: files in this dir + inferred subdirectories
-        let mut entries: Vec<LsEntry> = Vec::new();
-        let mut seen_dirs: Vec<String> = Vec::new();
-
-        for f in &all_files {
-            // Check if file is under target directory
-            if target_path == "/" {
-                // Root: all files start with /
-                if !f.name.starts_with('/') {
-                    continue;
-                }
-            } else {
-                if !f.name.starts_with(&prefix) {
-                    continue;
-                }
-            }
-
-            // Get relative path after the target directory
-            let relative = if target_path == "/" {
-                &f.name[1..] // Skip leading /
-            } else {
-                &f.name[prefix.len()..] // Skip prefix including trailing /
-            };
-
-            if relative.is_empty() {
-                continue;
-            }
-
-            // Check if there's a subdirectory (contains /)
-            if let Some(slash_pos) = relative.find('/') {
-                // This is a subdirectory
-                let dir_name = &relative[..slash_pos];
-                if !seen_dirs.iter().any(|d| d == dir_name) {
-                    seen_dirs.push(String::from(dir_name));
-                    entries.push(LsEntry {
-                        name: String::from(dir_name),
-                        size: 0,
-                        is_dir: true,
-                    });
-                }
-            } else {
-                // Direct file in this directory
-                entries.push(LsEntry {
-                    name: String::from(relative),
-                    size: f.size,
-                    is_dir: false,
-                });
-            }
-        }
-
-        if entries.is_empty() {
-            // Check if path exists at all
-            let path_exists = all_files.iter().any(|f| {
-                f.name == target_path || f.name.starts_with(&prefix)
-            });
-            if !path_exists && target_path != "/" {
-                out_str("ls: cannot access '");
-                out_str(&target_path);
-                out_line("': No such file or directory");
-                return;
-            }
-            // Directory exists but is empty
-            out_line("\x1b[0;90m(empty)\x1b[0m");
-            return;
-        }
-
-        // Sort: directories first, then files, alphabetically
-        entries.sort_by(|a, b| {
-            match (a.is_dir, b.is_dir) {
-                (true, false) => core::cmp::Ordering::Less,
-                (false, true) => core::cmp::Ordering::Greater,
-                _ => a.name.cmp(&b.name),
-            }
-        });
-
-        let is_usr_bin = target_path == "/usr/bin" || target_path.starts_with("/usr/bin/");
-
-        if show_long {
-            // Long format
-            for e in &entries {
-                if e.is_dir {
-                    out_str(" \x1b[0;90m<dir>\x1b[0m  \x1b[1;34m");
-                    out_str(&e.name);
-                    out_line("/\x1b[0m");
-                } else {
-                    let size_str = format!("{:>6}", e.size);
-                    out_str(&size_str);
-                    out_str("  ");
-                    if is_usr_bin {
-                        out_str("\x1b[1;32m");
-                    }
-                    out_str(&e.name);
-                    if is_usr_bin {
-                        out_str("\x1b[0m");
-                    }
-                    out_line("");
-                }
-            }
-            let dir_count = entries.iter().filter(|e| e.is_dir).count();
-            let file_count = entries.len() - dir_count;
-            out_line("");
-            out_str(&format!("\x1b[0;90m{} dir(s), {} file(s)\x1b[0m", dir_count, file_count));
-            out_line("");
-        } else {
-            // Compact columnar format
-            let max_len = entries.iter()
-                .map(|e| e.name.len() + if e.is_dir { 1 } else { 0 })
-                .max()
-                .unwrap_or(4);
-            let col_width = (max_len + 2).max(4);
-            let num_cols = (60 / col_width).max(1);
-            let mut col = 0;
-
-            for e in &entries {
-                let display_len = e.name.len() + if e.is_dir { 1 } else { 0 };
-
-                if e.is_dir {
-                    out_str("\x1b[1;34m");
-                    out_str(&e.name);
-                    out_str("/\x1b[0m");
-                } else if is_usr_bin {
-                    out_str("\x1b[1;32m");
-                    out_str(&e.name);
-                    out_str("\x1b[0m");
-                } else {
-                    out_str(&e.name);
-                }
-
-                col += 1;
-                if col >= num_cols {
-                    out_line("");
-                    col = 0;
-                } else {
-                    for _ in 0..(col_width - display_len) {
-                        out_str(" ");
-                    }
-                }
-            }
-            if col > 0 {
-                out_line("");
-            }
-        }
-    } else {
-        out_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
-    }
-}
-
-/// cat - Display file contents (native implementation)
-fn native_cat(args: &str) {
-    let path = args.trim();
-    if path.is_empty() {
-        out_line("Usage: cat <filename>");
-        return;
-    }
-
-    // Resolve path
-    let filename = if path.starts_with('/') {
-        String::from(path)
-    } else {
-        let cwd = cwd_get();
-        if cwd == "/" {
-            format!("/{}", path)
-        } else {
-            format!("{}/{}", cwd, path)
-        }
-    };
-
-    let fs_guard = FS_STATE.lock();
-    let mut blk_guard = BLK_DEV.lock();
-
-    if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
-        match fs.read_file(dev, &filename) {
-            Some(content) => {
-                if let Ok(text) = core::str::from_utf8(&content) {
-                    out_str(text);
-                    if !text.ends_with('\n') {
-                        out_line("");
-                    }
-                } else {
-                    out_line("\x1b[1;31mError:\x1b[0m File contains invalid UTF-8");
-                }
-            }
-            None => {
-                out_str("Error: File not found: ");
-                out_line(&filename);
-            }
-        }
-    } else {
-        out_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
-    }
-}
-
-/// echo - Print arguments (native implementation)
-fn native_echo(args: &str) {
-    out_line(args);
-}
+// NOTE: ls, cat, echo have been moved to WASM binaries in /usr/bin/
 
 /// ps - List processes (native implementation)
 fn native_ps() {
@@ -376,23 +101,7 @@ fn native_ps() {
     out_line("\x1b[90mStates: R=Ready R+=Running S=Sleeping Z=Zombie\x1b[0m");
 }
 
-/// uptime - Show system uptime (native implementation)
-fn native_uptime() {
-    let ms = get_time_ms();
-    let total_sec = ms / 1000;
-    let hours = total_sec / 3600;
-    let minutes = (total_sec % 3600) / 60;
-    let seconds = total_sec % 60;
-
-    if hours > 0 {
-        out_str(&format!("Uptime: {}h {}m {}s", hours, minutes, seconds));
-    } else if minutes > 0 {
-        out_str(&format!("Uptime: {}m {}s", minutes, seconds));
-    } else {
-        out_str(&format!("Uptime: {}s", seconds));
-    }
-    out_line("");
-}
+// NOTE: uptime has been moved to WASM binary in /usr/bin/
 
 /// memstats - Show memory statistics (native implementation)
 fn native_memstats() {
@@ -581,123 +290,7 @@ fn native_sysinfo() {
     out_line("");
 }
 
-/// grep - Search for patterns in files (native implementation)
-fn native_grep(args: &str) {
-    let mut case_insensitive = false;
-    let mut show_line_numbers = false;
-    let mut invert_match = false;
-    let mut pattern = String::new();
-    let mut files: Vec<String> = Vec::new();
-
-    // Parse arguments
-    for arg in args.split_whitespace() {
-        if arg.starts_with('-') && pattern.is_empty() {
-            for ch in arg.chars().skip(1) {
-                match ch {
-                    'i' => case_insensitive = true,
-                    'n' => show_line_numbers = true,
-                    'v' => invert_match = true,
-                    _ => {}
-                }
-            }
-        } else if pattern.is_empty() {
-            pattern = String::from(arg);
-        } else {
-            files.push(String::from(arg));
-        }
-    }
-
-    if pattern.is_empty() {
-        out_line("Usage: grep [OPTIONS] <pattern> [file...]");
-        out_line("Options: -i (case-insensitive), -n (line numbers), -v (invert)");
-        return;
-    }
-
-    // If no files specified, show usage
-    if files.is_empty() {
-        out_line("Usage: grep [OPTIONS] <pattern> <file...>");
-        return;
-    }
-
-    let search_pattern = if case_insensitive {
-        pattern.to_lowercase()
-    } else {
-        pattern.clone()
-    };
-
-    let fs_guard = FS_STATE.lock();
-    let mut blk_guard = BLK_DEV.lock();
-
-    if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
-        for file_arg in &files {
-            // Resolve path
-            let filepath = if file_arg.starts_with('/') {
-                file_arg.clone()
-            } else {
-                let cwd = cwd_get();
-                if cwd == "/" {
-                    format!("/{}", file_arg)
-                } else {
-                    format!("{}/{}", cwd, file_arg)
-                }
-            };
-
-            match fs.read_file(dev, &filepath) {
-                Some(content) => {
-                    if let Ok(text) = core::str::from_utf8(&content) {
-                        let show_filename = files.len() > 1;
-                        for (line_num, line) in text.lines().enumerate() {
-                            let search_line = if case_insensitive {
-                                line.to_lowercase()
-                            } else {
-                                String::from(line)
-                            };
-
-                            let matches = search_line.contains(&search_pattern);
-                            let should_print = if invert_match { !matches } else { matches };
-
-                            if should_print {
-                                if show_filename {
-                                    out_str("\x1b[1;35m");
-                                    out_str(&filepath);
-                                    out_str("\x1b[0m:");
-                                }
-                                if show_line_numbers {
-                                    out_str("\x1b[1;32m");
-                                    out_str(&format!("{}", line_num + 1));
-                                    out_str("\x1b[0m:");
-                                }
-                                // Highlight match
-                                if !invert_match {
-                                    let idx = search_line.find(&search_pattern);
-                                    if let Some(i) = idx {
-                                        out_str(&line[..i]);
-                                        out_str("\x1b[1;31m");
-                                        out_str(&line[i..i + pattern.len()]);
-                                        out_str("\x1b[0m");
-                                        out_str(&line[i + pattern.len()..]);
-                                        out_line("");
-                                    } else {
-                                        out_line(line);
-                                    }
-                                } else {
-                                    out_line(line);
-                                }
-                            }
-                        }
-                    }
-                }
-                None => {
-                    out_str("\x1b[1;31mgrep:\x1b[0m ");
-                    out_str(&filepath);
-                    out_line(": No such file");
-                }
-            }
-        }
-    } else {
-        out_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
-    }
-}
+// NOTE: grep has been moved to WASM binary in /usr/bin/
 
 /// ip - Show network configuration (native implementation)
 fn native_ip(args: &str) {
@@ -1127,86 +720,7 @@ fn native_service(args: &str) {
     }
 }
 
-/// tail - Show last lines of a file (native implementation)
-fn native_tail(args: &str) {
-    let mut num_lines: usize = 10;
-    let mut files: Vec<String> = Vec::new();
-
-    let mut iter = args.split_whitespace().peekable();
-    while let Some(arg) = iter.next() {
-        if arg == "-n" {
-            if let Some(n) = iter.next() {
-                num_lines = n.parse().unwrap_or(10);
-            }
-        } else if arg.starts_with("-n") {
-            let n = &arg[2..];
-            num_lines = n.parse().unwrap_or(10);
-        } else if arg.starts_with('-') && arg.len() > 1 {
-            // Try to parse as -NUM
-            if let Ok(n) = arg[1..].parse::<usize>() {
-                num_lines = n;
-            }
-        } else {
-            files.push(String::from(arg));
-        }
-    }
-
-    if files.is_empty() {
-        out_line("Usage: tail [-n NUM] <file...>");
-        return;
-    }
-
-    let fs_guard = FS_STATE.lock();
-    let mut blk_guard = BLK_DEV.lock();
-
-    if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
-        let show_headers = files.len() > 1;
-
-        for (i, file_arg) in files.iter().enumerate() {
-            // Resolve path
-            let filepath = if file_arg.starts_with('/') {
-                file_arg.clone()
-            } else {
-                let cwd = cwd_get();
-                if cwd == "/" {
-                    format!("/{}", file_arg)
-                } else {
-                    format!("{}/{}", cwd, file_arg)
-                }
-            };
-
-            match fs.read_file(dev, &filepath) {
-                Some(content) => {
-                    if show_headers {
-                        if i > 0 { out_line(""); }
-                        out_str("\x1b[1m==> ");
-                        out_str(&filepath);
-                        out_line(" <==\x1b[0m");
-                    }
-
-                    if let Ok(text) = core::str::from_utf8(&content) {
-                        let lines: Vec<&str> = text.lines().collect();
-                        let start = if lines.len() > num_lines {
-                            lines.len() - num_lines
-                        } else {
-                            0
-                        };
-                        for line in &lines[start..] {
-                            out_line(line);
-                        }
-                    }
-                }
-                None => {
-                    out_str("\x1b[1;31mtail:\x1b[0m cannot open '");
-                    out_str(&filepath);
-                    out_line("': No such file");
-                }
-            }
-        }
-    } else {
-        out_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
-    }
-}
+// NOTE: tail has been moved to WASM binary in /usr/bin/
 
 /// Format uptime for display
 fn format_uptime(ms: i64) -> String {
@@ -1337,49 +851,7 @@ fn native_top(args: &str) {
     }
 }
 
-/// write - Write content to a file (native implementation)
-fn native_write(args: &str) {
-    let parts: Vec<&str> = args.splitn(2, ' ').collect();
-
-    if parts.len() < 2 {
-        out_line("Usage: write <filename> <content...>");
-        out_line("Example: write test.txt Hello World!");
-        return;
-    }
-
-    let path_arg = parts[0];
-    let content = parts[1];
-
-    // Resolve path
-    let filename = if path_arg.starts_with('/') {
-        String::from(path_arg)
-    } else {
-        let cwd = cwd_get();
-        if cwd == "/" {
-            format!("/{}", path_arg)
-        } else {
-            format!("{}/{}", cwd, path_arg)
-        }
-    };
-
-    let mut fs_guard = FS_STATE.lock();
-    let mut blk_guard = BLK_DEV.lock();
-
-    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-        match fs.write_file(dev, &filename, content.as_bytes()) {
-            Ok(()) => {
-                out_str("\x1b[1;32m✓\x1b[0m Written to ");
-                out_line(&filename);
-            }
-            Err(_) => {
-                out_str("\x1b[1;31mError:\x1b[0m Failed to write to ");
-                out_line(&filename);
-            }
-        }
-    } else {
-        out_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
-    }
-}
+// NOTE: write has been moved to WASM binary in /usr/bin/
 
 pub fn node(_args: &[u8]) {
     out_line("");
@@ -1424,6 +896,9 @@ pub fn help() {
         "\x1b[1;36m│\x1b[0m  \x1b[1;33mWASM Programs:\x1b[0m  \x1b[0;90m(in /usr/bin/)\x1b[0m                          \x1b[1;36m│\x1b[0m",
     );
     out_line(
+        "\x1b[1;36m│\x1b[0m    ls, cat, echo, grep, tail, uptime, write                 \x1b[1;36m│\x1b[0m",
+    );
+    out_line(
         "\x1b[1;36m│\x1b[0m    help, cowsay, dmesg, nano, pkg, wget, ...                \x1b[1;36m│\x1b[0m",
     );
     out_line(
@@ -1433,10 +908,10 @@ pub fn help() {
         "\x1b[1;36m│\x1b[0m  \x1b[1;33mNative Commands:\x1b[0m                                          \x1b[1;36m│\x1b[0m",
     );
     out_line(
-        "\x1b[1;36m│\x1b[0m    ls, cat, echo, ps, top, uptime, memstats, ip, netstat    \x1b[1;36m│\x1b[0m",
+        "\x1b[1;36m│\x1b[0m    ps, top, memstats, sysinfo, kill, service                \x1b[1;36m│\x1b[0m",
     );
     out_line(
-        "\x1b[1;36m│\x1b[0m    grep, mkdir, rm, tail, write, kill, service, sysinfo     \x1b[1;36m│\x1b[0m",
+        "\x1b[1;36m│\x1b[0m    ip, netstat, mkdir, rm                                   \x1b[1;36m│\x1b[0m",
     );
     out_line(
         "\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m",
