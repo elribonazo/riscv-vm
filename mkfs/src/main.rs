@@ -115,12 +115,98 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    // 8. Write Bitmap back to disk
+    // 8. Import WASM binaries from target/wasm32-unknown-unknown/release/
+    // These are compiled from mkfs/src/bin/*.rs files
+    {
+        // Try multiple possible locations for the wasm target directory
+        let possible_paths = [
+            // Relative to current directory (workspace root)
+            PathBuf::from("target/wasm32-unknown-unknown/release"),
+            // Relative to output file location
+            args.output
+                .parent()
+                .map(|p| p.join("wasm32-unknown-unknown/release"))
+                .unwrap_or_default(),
+            // Relative to source directory
+            args.dir
+                .as_ref()
+                .and_then(|d| d.parent())
+                .map(|p| p.join("target/wasm32-unknown-unknown/release"))
+                .unwrap_or_default(),
+        ];
+
+        for wasm_path in possible_paths.iter() {
+            if wasm_path.exists() && wasm_path.is_dir() {
+                println!("\n🔷 Importing WASM binaries from {:?}...", wasm_path);
+                dir_idx = import_wasm_binaries(&mut file, &mut bitmap, wasm_path, dir_idx)?;
+                break;
+            }
+        }
+    }
+
+    // 9. Write Bitmap back to disk
     file.seek(SeekFrom::Start(SEC_MAP_START * SECTOR_SIZE))?;
     file.write_all(&bitmap)?;
 
     println!("\n✅ Done. {} files imported.", dir_idx);
     Ok(())
+}
+
+/// Import WASM binaries from target directory into /usr/bin/
+/// Only imports .wasm files that correspond to binaries in mkfs/src/bin/
+fn import_wasm_binaries(
+    file: &mut File,
+    bitmap: &mut Vec<u8>,
+    wasm_dir: &PathBuf,
+    mut dir_idx: u64,
+) -> std::io::Result<u64> {
+    for entry in fs::read_dir(wasm_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only process .wasm files
+        if !path.is_file() {
+            continue;
+        }
+
+        let extension = path.extension().and_then(|e| e.to_str());
+        if extension != Some("wasm") {
+            continue;
+        }
+
+        // Get the binary name (without .wasm extension)
+        let bin_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        // Skip library files, deps, and non-script binaries
+        if bin_name.is_empty()
+            || bin_name.starts_with("lib")
+            || bin_name.contains('-')
+            || bin_name == "mkfs"
+            || bin_name == "riscv_vm"  // Skip the VM itself
+        {
+            continue;
+        }
+
+        // Create the filesystem path: /usr/bin/<name>
+        let fs_path = format!("/usr/bin/{}", bin_name);
+
+        if fs_path.len() > 23 {
+            println!("  ⚠️  Skipping {}: Path too long (max 23 chars)", fs_path);
+            continue;
+        }
+
+        println!("  🔷 Importing {} -> {}", bin_name, fs_path);
+
+        let data = fs::read(&path)?;
+        let head_sector = write_data(file, bitmap, &data)?;
+        write_dir_entry(file, dir_idx, &fs_path, data.len() as u32, head_sector)?;
+        dir_idx += 1;
+    }
+
+    Ok(dir_idx)
 }
 
 /// Import all files from a directory into the filesystem image
@@ -153,9 +239,11 @@ fn import_directory(
                 continue;
             }
 
-            // Show different icon for scripts
+            // Show different icon for different file types
             let icon = if filename.ends_with(".rhai") {
                 "📜"
+            } else if filename.ends_with(".wasm") {
+                "🔷"
             } else {
                 "📄"
             };

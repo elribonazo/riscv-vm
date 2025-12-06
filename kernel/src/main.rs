@@ -10,6 +10,7 @@ mod allocator;
 mod cmd;
 mod dns;
 mod lock;
+mod wasm;
 
 // Re-export Spinlock for convenience
 pub use lock::Spinlock;
@@ -470,6 +471,56 @@ const CLINT_MTIME: usize = 0x0200_BFF8;
 const TEST_FINISHER: usize = 0x0010_0000;
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SYSINFO MMIO DEVICE - for reporting stats to emulator
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Base address for the SysInfo MMIO device (must match emulator)
+const SYSINFO_BASE: usize = 0x0011_0000;
+
+/// SysInfo register offsets (all 64-bit values are 8-byte aligned for RISC-V)
+const SYSINFO_HEAP_USED: usize = SYSINFO_BASE + 0x00;
+const SYSINFO_HEAP_TOTAL: usize = SYSINFO_BASE + 0x08;
+const SYSINFO_DISK_USED: usize = SYSINFO_BASE + 0x10;
+const SYSINFO_DISK_TOTAL: usize = SYSINFO_BASE + 0x18;
+const SYSINFO_CPU_COUNT: usize = SYSINFO_BASE + 0x20;
+// 0x24 is padding for 8-byte alignment
+const SYSINFO_UPTIME: usize = SYSINFO_BASE + 0x28;
+
+/// Write system statistics to the MMIO SysInfo device
+/// This allows the emulator to read kernel stats and display them in the UI
+fn update_sysinfo() {
+    // Get heap stats
+    let (heap_used, _heap_free) = allocator::heap_stats();
+    let heap_total = allocator::heap_size();
+    
+    // Get disk stats (if filesystem available)
+    let (disk_used, disk_total) = {
+        let fs_guard = FS_STATE.lock();
+        if let Some(ref fs) = *fs_guard {
+            fs.disk_usage_bytes()
+        } else {
+            (0, 0)
+        }
+    };
+    
+    // Get CPU count
+    let cpu_count = HARTS_ONLINE.load(Ordering::Relaxed);
+    
+    // Get uptime
+    let uptime_ms = get_time_ms() as u64;
+    
+    // Write to MMIO registers (volatile writes, all 64-bit writes are 8-byte aligned)
+    unsafe {
+        core::ptr::write_volatile(SYSINFO_HEAP_USED as *mut u64, heap_used as u64);
+        core::ptr::write_volatile(SYSINFO_HEAP_TOTAL as *mut u64, heap_total as u64);
+        core::ptr::write_volatile(SYSINFO_DISK_USED as *mut u64, disk_used);
+        core::ptr::write_volatile(SYSINFO_DISK_TOTAL as *mut u64, disk_total);
+        core::ptr::write_volatile(SYSINFO_CPU_COUNT as *mut u32, cpu_count as u32);
+        core::ptr::write_volatile(SYSINFO_UPTIME as *mut u64, uptime_ms);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SPINLOCK-PROTECTED GLOBAL STATE
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -761,6 +812,9 @@ fn run_hart0_tasks() {
     // Run daemon tick functions (they check their own timing internally)
     init::klogd_tick();
     init::sysmond_tick();
+    
+    // Update system info MMIO device (for emulator UI)
+    update_sysinfo();
 }
 
 /// Check for new content in a file being followed by tail -f
@@ -978,10 +1032,6 @@ fn main() -> ! {
 
     // ─── STORAGE SUBSYSTEM ────────────────────────────────────────────────────
     init_storage();
-
-    // ─── SCRIPTING ENGINE ──────────────────────────────────────────────────────
-    // Preload scripts from /usr/bin/ into AST cache for faster first execution
-    scripting::preload_scripts();
 
     // ─── NETWORK SUBSYSTEM ────────────────────────────────────────────────────
     print_section("NETWORK SUBSYSTEM");
@@ -2057,9 +2107,9 @@ fn execute_command(cmd: &[u8], args: &[u8]) {
             return;
         }
 
-        // Help - try script first, fall back to built-in
+        // Help - try WASM script first, fall back to built-in
         "help" => {
-            // First try to run help script
+            // First try to run help WASM binary
             if let Some(script_bytes) = scripting::find_script("help") {
                 run_script_bytes(&script_bytes, args_str);
                 return;
@@ -2101,20 +2151,26 @@ fn execute_command(cmd: &[u8], args: &[u8]) {
     out_line("\x1b[0;90mTry 'help' for available commands, or check /usr/bin/ for scripts\x1b[0m");
 }
 
-/// Run a script from its bytes
+/// Run a script from its bytes (WASM only)
 fn run_script_bytes(bytes: &[u8], args: &str) {
-    let script = unsafe { core::str::from_utf8_unchecked(bytes) };
-    match scripting::execute_script(script, args) {
-        Ok(output) => {
-            if !output.is_empty() {
-                out_str(&output);
-            }
-        }
-        Err(e) => {
-            out_str("\x1b[1;31mScript error:\x1b[0m ");
+    // Detect \0asm magic header for WASM binaries
+    if bytes.len() >= 4
+        && bytes[0] == 0x00
+        && bytes[1] == 0x61
+        && bytes[2] == 0x73
+        && bytes[3] == 0x6D
+    {
+        let args_vec: Vec<&str> = args.split_whitespace().collect();
+        if let Err(e) = wasm::execute(bytes, &args_vec) {
+            out_str("\x1b[1;31mError:\x1b[0m ");
             out_line(&e);
         }
+        return;
     }
+
+    // Not a WASM binary
+    out_line("\x1b[1;31mError:\x1b[0m Not a valid WASM binary");
+    out_line("\x1b[0;90mScripts must be compiled to WASM (wasm32-unknown-unknown)\x1b[0m");
 }
 
 /// Resolve a path relative to CWD

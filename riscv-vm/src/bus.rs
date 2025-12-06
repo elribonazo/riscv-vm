@@ -1,6 +1,7 @@
 use crate::Trap;
 use crate::devices::clint::{CLINT_BASE, CLINT_SIZE, Clint};
 use crate::devices::plic::{PLIC_BASE, PLIC_SIZE, Plic, UART_IRQ, VIRTIO0_IRQ};
+use crate::devices::sysinfo::{SYSINFO_BASE, SYSINFO_SIZE, SysInfo};
 use crate::devices::uart::{UART_BASE, UART_SIZE, Uart};
 use crate::devices::virtio::VirtioDevice;
 use crate::dram::Dram;
@@ -286,6 +287,7 @@ pub struct SystemBus {
     pub clint: Clint,
     pub plic: Plic,
     pub uart: Uart,
+    pub sysinfo: SysInfo,
     pub virtio_devices: Vec<Box<dyn VirtioDevice>>,
     /// Shared CLINT for WASM workers (routes CLINT accesses to SharedArrayBuffer)
     #[cfg(target_arch = "wasm32")]
@@ -305,6 +307,7 @@ impl SystemBus {
             clint: Clint::new(),
             plic: Plic::new(),
             uart: Uart::new(),
+            sysinfo: SysInfo::new(),
             virtio_devices: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             shared_clint: None,
@@ -357,6 +360,7 @@ impl SystemBus {
             clint,
             plic: Plic::new(),
             uart: Uart::new(),
+            sysinfo: SysInfo::new(),
             virtio_devices: Vec::new(),
             shared_clint: Some(shared_clint),
             shared_uart_output: Some(shared_uart_output),
@@ -594,6 +598,13 @@ impl SystemBus {
             return Ok(0);
         }
 
+        // SysInfo device
+        if addr >= SYSINFO_BASE && addr < SYSINFO_BASE + SYSINFO_SIZE {
+            let offset = addr - SYSINFO_BASE;
+            let val = self.sysinfo.load(offset, 1);
+            return Ok(val as u8);
+        }
+
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
             let offset = addr - CLINT_BASE;
             let val = self.clint_load(offset, 1);
@@ -665,6 +676,12 @@ impl SystemBus {
             return Ok(0);
         }
 
+        if addr >= SYSINFO_BASE && addr < SYSINFO_BASE + SYSINFO_SIZE {
+            let offset = addr - SYSINFO_BASE;
+            let val = self.sysinfo.load(offset, 2);
+            return Ok(val as u16);
+        }
+
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
             let offset = addr - CLINT_BASE;
             let val = self.clint_load(offset, 2);
@@ -712,6 +729,12 @@ impl SystemBus {
             return Ok(0);
         }
 
+        if addr >= SYSINFO_BASE && addr < SYSINFO_BASE + SYSINFO_SIZE {
+            let offset = addr - SYSINFO_BASE;
+            let val = self.sysinfo.load(offset, 4);
+            return Ok(val as u32);
+        }
+
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
             let offset = addr - CLINT_BASE;
             let val = self.clint_load(offset, 4);
@@ -755,6 +778,12 @@ impl SystemBus {
     fn read64_slow(&self, addr: u64) -> Result<u64, Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Ok(0);
+        }
+
+        if addr >= SYSINFO_BASE && addr < SYSINFO_BASE + SYSINFO_SIZE {
+            let offset = addr - SYSINFO_BASE;
+            let val = self.sysinfo.load(offset, 8);
+            return Ok(val);
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -806,6 +835,12 @@ impl SystemBus {
             return Err(Trap::RequestedTrap(val as u64));
         }
 
+        if addr >= SYSINFO_BASE && addr < SYSINFO_BASE + SYSINFO_SIZE {
+            let offset = addr - SYSINFO_BASE;
+            self.sysinfo.store(offset, 1, val as u64);
+            return Ok(());
+        }
+
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
             let offset = addr - CLINT_BASE;
             self.clint_store(offset, 1, val as u64);
@@ -854,6 +889,12 @@ impl SystemBus {
             return Err(Trap::RequestedTrap(val as u64));
         }
 
+        if addr >= SYSINFO_BASE && addr < SYSINFO_BASE + SYSINFO_SIZE {
+            let offset = addr - SYSINFO_BASE;
+            self.sysinfo.store(offset, 2, val as u64);
+            return Ok(());
+        }
+
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
             let offset = addr - CLINT_BASE;
             self.clint_store(offset, 2, val as u64);
@@ -887,6 +928,12 @@ impl SystemBus {
     fn write32_slow(&self, addr: u64, val: u32) -> Result<(), Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Err(Trap::RequestedTrap(val as u64));
+        }
+
+        if addr >= SYSINFO_BASE && addr < SYSINFO_BASE + SYSINFO_SIZE {
+            let offset = addr - SYSINFO_BASE;
+            self.sysinfo.store(offset, 4, val as u64);
+            return Ok(());
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {
@@ -930,6 +977,12 @@ impl SystemBus {
     fn write64_slow(&self, addr: u64, val: u64) -> Result<(), Trap> {
         if addr >= TEST_FINISHER_BASE && addr < TEST_FINISHER_BASE + TEST_FINISHER_SIZE {
             return Err(Trap::RequestedTrap(val));
+        }
+
+        if addr >= SYSINFO_BASE && addr < SYSINFO_BASE + SYSINFO_SIZE {
+            let offset = addr - SYSINFO_BASE;
+            self.sysinfo.store(offset, 8, val);
+            return Ok(());
         }
 
         if addr >= CLINT_BASE && addr < CLINT_BASE + CLINT_SIZE {

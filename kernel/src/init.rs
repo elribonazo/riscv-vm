@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::klog::{klog_error, klog_info};
+use crate::klog::{klog_debug, klog_error, klog_info};
 use crate::scheduler::SCHEDULER;
 use crate::task::Priority;
 use crate::Spinlock;
@@ -339,6 +339,7 @@ fn mark_service_stopped(name: &str) {
 }
 
 /// Run init scripts from /etc/init.d/
+/// Note: Init scripts must be WASM binaries
 fn run_init_scripts() {
     let mut fs_guard = crate::FS_STATE.lock();
     let mut blk_guard = crate::BLK_DEV.lock();
@@ -349,26 +350,28 @@ fn run_init_scripts() {
         for file in files {
             if file.name.starts_with("/etc/init.d/") {
                 let script_name = &file.name[12..]; // Strip "/etc/init.d/"
-                klog_info("init", &format!("Running init script: {}", script_name));
-
-                // Read and execute the script
+                
+                // Read the script content
                 if let Some(content) = fs.read_file(dev, &file.name) {
-                    if let Ok(script) = core::str::from_utf8(&content) {
+                    // Check if it's a WASM binary
+                    if content.len() >= 4 
+                        && content[0] == 0x00 
+                        && content[1] == 0x61 
+                        && content[2] == 0x73 
+                        && content[3] == 0x6D 
+                    {
+                        klog_info("init", &format!("Running init script: {}", script_name));
                         drop(blk_guard);
                         drop(fs_guard);
-
-                        // Execute via scripting engine
-                        match crate::scripting::execute_script(script, "") {
-                            Ok(output) => {
-                                if !output.is_empty() {
-                                    klog_info("init", &format!("Script output: {}", output.trim()));
-                                }
-                            }
-                            Err(e) => {
-                                klog_error("init", &format!("Script error: {}", e));
-                            }
+                        
+                        // Execute WASM binary
+                        if let Err(e) = crate::wasm::execute(&content, &[]) {
+                            klog_error("init", &format!("Init script error: {}", e));
                         }
                         return; // Re-acquire locks would be complex, just return
+                    } else {
+                        // Not a WASM binary, skip (legacy text scripts)
+                        klog_debug("init", &format!("Skipping non-WASM init script: {}", script_name));
                     }
                 }
             }

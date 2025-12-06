@@ -189,6 +189,47 @@ impl NativeVm {
         &self.bus
     }
 
+    /// Get heap memory usage from the guest kernel.
+    /// Returns (used_bytes, total_bytes).
+    pub fn get_heap_usage(&self) -> (u64, u64) {
+        self.bus.sysinfo.heap_usage()
+    }
+
+    /// Get disk usage from the guest kernel.
+    /// Returns (used_bytes, total_bytes).
+    pub fn get_disk_usage(&self) -> (u64, u64) {
+        self.bus.sysinfo.disk_usage()
+    }
+
+    /// Get the total disk capacity from attached VirtIO block devices.
+    /// Returns total bytes across all block devices.
+    pub fn get_disk_capacity(&self) -> u64 {
+        let mut total: u64 = 0;
+        for device in &self.bus.virtio_devices {
+            // VirtIO block device has device_id 2
+            if device.device_id() == 2 {
+                // Read capacity from config space (offset 0x100 and 0x104)
+                if let Ok(cap_lo) = device.read(0x100) {
+                    if let Ok(cap_hi) = device.read(0x104) {
+                        let capacity_sectors = cap_lo | (cap_hi << 32);
+                        total += capacity_sectors * 512; // Convert sectors to bytes
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    /// Get CPU count (from kernel-reported value).
+    pub fn get_cpu_count(&self) -> u32 {
+        self.bus.sysinfo.cpu_count()
+    }
+
+    /// Get system uptime in milliseconds (from kernel-reported value).
+    pub fn get_uptime_ms(&self) -> u64 {
+        self.bus.sysinfo.uptime_ms()
+    }
+
     /// Start worker threads for secondary harts.
     pub fn start_workers(&mut self) {
         for hart_id in 1..self.num_harts {

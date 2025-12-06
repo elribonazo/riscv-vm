@@ -3,7 +3,7 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use crate::{
-    allocator, dns, net, scheduler, scripting, uart, BenchmarkMode, PingState, BENCHMARK, BLK_DEV,
+    allocator, dns, net, scheduler, uart, BenchmarkMode, PingState, BENCHMARK, BLK_DEV,
     COMMAND_RUNNING, FS_STATE, HARTS_ONLINE, NET_STATE, PING_STATE, TEST_FINISHER,
 };
 use crate::{count_primes_in_range, cwd_get, cwd_set, get_time_ms, resolve_path, send_ipi};
@@ -1381,94 +1381,13 @@ fn native_write(args: &str) {
     }
 }
 
-pub fn node(args: &[u8]) {
-    let args_str = core::str::from_utf8(args).unwrap_or("").trim();
-
-    if args_str.is_empty() || args_str == "info" {
-        scripting::print_info();
-    } else if args_str.starts_with("log ") {
-        let level_str = args_str.strip_prefix("log ").unwrap_or("").trim();
-        let level = match level_str {
-            "off" | "OFF" => scripting::LogLevel::Off,
-            "error" | "ERROR" => scripting::LogLevel::Error,
-            "warn" | "WARN" => scripting::LogLevel::Warn,
-            "info" | "INFO" => scripting::LogLevel::Info,
-            "debug" | "DEBUG" => scripting::LogLevel::Debug,
-            "trace" | "TRACE" => scripting::LogLevel::Trace,
-            _ => {
-                out_line("Usage: node log <level>");
-                out_line("Levels: off, error, warn, info, debug, trace");
-                return;
-            }
-        };
-        scripting::set_log_level(level);
-        out_str("\x1b[1;32m✓\x1b[0m Script log level set to: ");
-        out_line(level_str);
-    } else if args_str == "eval" || args_str.starts_with("eval ") {
-        let expr = args_str.strip_prefix("eval").unwrap_or("").trim();
-        if expr.is_empty() {
-            out_line("Usage: node eval <expression>");
-            out_line("Example: node eval 2 + 2 * 3");
-            return;
-        }
-        match scripting::execute_script_uncached(expr, "") {
-            Ok(output) => {
-                if !output.is_empty() {
-                    out_str(&output);
-                }
-            }
-            Err(e) => {
-                out_str("\x1b[1;31mError:\x1b[0m ");
-                out_line(&e);
-            }
-        }
-    } else if !args_str.is_empty() {
-        let (script_name, script_args) = match args_str.split_once(' ') {
-            Some((name, rest)) => (name, rest),
-            None => (args_str, ""),
-        };
-
-        let resolved_path = if script_name.starts_with('/') {
-            String::from(script_name)
-        } else {
-            resolve_path(script_name)
-        };
-
-        let script_result = {
-            let fs_guard = FS_STATE.lock();
-            let mut blk_guard = BLK_DEV.lock();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_ref(), blk_guard.as_mut()) {
-                fs.read_file(dev, &resolved_path)
-            } else {
-                out_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
-                return;
-            }
-        };
-
-        match script_result {
-            Some(script_bytes) => {
-                if let Ok(script) = core::str::from_utf8(&script_bytes) {
-                    match scripting::execute_script(script, script_args) {
-                        Ok(output) => {
-                            if !output.is_empty() {
-                                out_str(&output);
-                            }
-                        }
-                        Err(e) => {
-                            out_str("\x1b[1;31mScript error:\x1b[0m ");
-                            out_line(&e);
-                        }
-                    }
-                } else {
-                    out_line("\x1b[1;31mError:\x1b[0m Invalid UTF-8 in script file");
-                }
-            }
-            None => {
-                out_str("\x1b[1;31mError:\x1b[0m Script not found: ");
-                out_line(&resolved_path);
-            }
-        }
-    }
+pub fn node(_args: &[u8]) {
+    out_line("");
+    out_line("\x1b[1;33mNote:\x1b[0m The 'node' command (Rhai scripting) has been removed.");
+    out_line("");
+    out_line("Scripts are now WASM binaries in /usr/bin/");
+    out_line("Run them directly by name, e.g.: \x1b[1mhelp\x1b[0m, \x1b[1mcowsay\x1b[0m, \x1b[1mdmesg\x1b[0m");
+    out_line("");
 }
 
 pub fn help() {
@@ -1499,34 +1418,25 @@ pub fn help() {
         "\x1b[1;36m│\x1b[0m    nslookup <host> DNS lookup                               \x1b[1;36m│\x1b[0m",
     );
     out_line(
-        "\x1b[1;36m│\x1b[0m    node [info]     Scripting engine info/control            \x1b[1;36m│\x1b[0m",
+        "\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m",
+    );
+    out_line(
+        "\x1b[1;36m│\x1b[0m  \x1b[1;33mWASM Programs:\x1b[0m  \x1b[0;90m(in /usr/bin/)\x1b[0m                          \x1b[1;36m│\x1b[0m",
+    );
+    out_line(
+        "\x1b[1;36m│\x1b[0m    help, cowsay, dmesg, nano, pkg, wget, ...                \x1b[1;36m│\x1b[0m",
     );
     out_line(
         "\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m",
     );
     out_line(
-        "\x1b[1;36m│\x1b[0m  \x1b[1;33mUser Scripts:\x1b[0m  \x1b[0;90m(in /usr/bin/ - Rhai language)\x1b[0m            \x1b[1;36m│\x1b[0m",
+        "\x1b[1;36m│\x1b[0m  \x1b[1;33mNative Commands:\x1b[0m                                          \x1b[1;36m│\x1b[0m",
     );
     out_line(
-        "\x1b[1;36m│\x1b[0m    help, ls, cat, echo, cowsay, sysinfo, ip, memstats, ...  \x1b[1;36m│\x1b[0m",
+        "\x1b[1;36m│\x1b[0m    ls, cat, echo, ps, top, uptime, memstats, ip, netstat    \x1b[1;36m│\x1b[0m",
     );
     out_line(
-        "\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m",
-    );
-    out_line(
-        "\x1b[1;36m│\x1b[0m  \x1b[1;33mKernel API:\x1b[0m  \x1b[0;90m(available in scripts)\x1b[0m                      \x1b[1;36m│\x1b[0m",
-    );
-    out_line(
-        "\x1b[1;36m│\x1b[0m    ls(), read_file(), write_file(), file_exists()           \x1b[1;36m│\x1b[0m",
-    );
-    out_line(
-        "\x1b[1;36m│\x1b[0m    get_ip(), get_mac(), get_gateway(), net_available()      \x1b[1;36m│\x1b[0m",
-    );
-    out_line(
-        "\x1b[1;36m│\x1b[0m    time_ms(), sleep(ms), kernel_version(), arch()           \x1b[1;36m│\x1b[0m",
-    );
-    out_line(
-        "\x1b[1;36m│\x1b[0m    heap_total(), heap_used(), heap_free()                   \x1b[1;36m│\x1b[0m",
+        "\x1b[1;36m│\x1b[0m    grep, mkdir, rm, tail, write, kill, service, sysinfo     \x1b[1;36m│\x1b[0m",
     );
     out_line(
         "\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m",
@@ -1538,7 +1448,7 @@ pub fn help() {
         "\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m",
     );
     out_line(
-        "\x1b[1;36m│\x1b[0m  \x1b[1;32mTip:\x1b[0m  \x1b[1;97mCtrl+C\x1b[0m cancel  |  \x1b[1;97m↑/↓\x1b[0m history  |  \x1b[1;97mnode info\x1b[0m API  \x1b[1;36m│\x1b[0m",
+        "\x1b[1;36m│\x1b[0m  \x1b[1;32mTip:\x1b[0m  \x1b[1;97mCtrl+C\x1b[0m cancel  |  \x1b[1;97m↑/↓\x1b[0m history                    \x1b[1;36m│\x1b[0m",
     );
     out_line("\x1b[1;36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
 }

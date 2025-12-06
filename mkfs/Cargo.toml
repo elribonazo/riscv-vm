@@ -1,7 +1,33 @@
 [package]
 name = "mkfs"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
+default-run = "mkfs"
+
+# The main mkfs tool binary (only for non-WASM)
+[[bin]]
+name = "mkfs"
+path = "src/main.rs"
+required-features = ["host-tool"]
+
+# Define the library so binary scripts can import common syscalls
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["host-tool"]
+host-tool = ["clap"]
 
 [dependencies]
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive"], optional = true }
+
+# Dependencies for the Scripts (WASM)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Add any no_std compatible crates here if needed
+
+[profile.release]
+lto = true
+opt-level = "s"  # Optimize for size
+strip = true
+panic = "abort"

@@ -308,6 +308,30 @@ impl FileSystem {
         self.cache.dirty_count() + if self.bitmap_dirty { 1 } else { 0 }
     }
 
+    /// Get disk usage statistics: (used_blocks, total_blocks)
+    /// 
+    /// This counts set bits in the bitmap to determine used blocks.
+    /// The bitmap tracks which 512-byte sectors are allocated.
+    pub fn disk_stats(&self) -> (u64, u64) {
+        // Count set bits in the bitmap (used blocks)
+        let mut used_blocks: u64 = 0;
+        for byte in self.bitmap_cache.iter() {
+            used_blocks += byte.count_ones() as u64;
+        }
+        
+        // Total blocks in the first bitmap sector = 512 * 8 = 4096 blocks
+        // Each bit represents one 512-byte block
+        let total_blocks: u64 = (self.bitmap_cache.len() * 8) as u64;
+        
+        (used_blocks, total_blocks)
+    }
+
+    /// Get disk usage in bytes: (used_bytes, total_bytes)
+    pub fn disk_usage_bytes(&self) -> (u64, u64) {
+        let (used_blocks, total_blocks) = self.disk_stats();
+        (used_blocks * 512, total_blocks * 512)
+    }
+
     /// List all files in the root directory
     /// Returns a Vec of FileInfo structs for use by the scripting engine
     pub fn list_dir(&mut self, dev: &mut VirtioBlock, _path: &str) -> Vec<FileInfo> {
@@ -567,7 +591,7 @@ impl FileSystem {
         None
     }
 
-    fn alloc_block(&mut self, dev: &mut VirtioBlock) -> Option<u32> {
+    fn alloc_block(&mut self, _dev: &mut VirtioBlock) -> Option<u32> {
         // Naive: Only searches the cached first sector of bitmap
         for i in 0..self.bitmap_cache.len() {
             if self.bitmap_cache[i] != 0xFF {
